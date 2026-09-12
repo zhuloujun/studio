@@ -1,12 +1,12 @@
 
 import type { TTSSettings, FavoriteItem, MangaDocumentDisplayInfo, NoteFavoriteItem, Annotation, MediaFavoriteItem, PlaybackMode } from '@/types';
-import { getCurrentUser } from './authService';
+import { getCachedUser } from './authService';
 
 // --- KEY GENERATION ---
 // All keys are now functions that generate user-specific keys.
 
 const getUserId = (): string | null => {
-    const user = getCurrentUser();
+    const user = getCachedUser();
     return user ? user.email : null;
 };
 

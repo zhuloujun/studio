@@ -2,7 +2,7 @@
 // src/lib/indexedDBService.ts
 import type { StoredMangaDocument, StoredPdfDocument, MangaDocumentDisplayInfo, MediaFavoriteItem } from '@/types';
 import { saveDocumentMetadata } from './localStorageService';
-import { getCurrentUser } from './authService';
+import { getCachedUser } from './authService';
 
 const DB_VERSION = 3; // Incremented version to add media store
 const DOC_STORE_NAME = 'documents';
@@ -17,7 +17,7 @@ let documentCache: StoredMangaDocument[] | null = null;
 let isFetching: Promise<StoredMangaDocument[]> | null = null;
 
 function getDBName(): string | null {
-    const user = getCurrentUser();
+    const user = getCachedUser();
     if (!user) return null;
     const userId = user.email.replace(/[^a-zA-Z0-9]/g, '_');
     return `MangaTalkDB_${userId}`;
@@ -98,7 +98,7 @@ export async function getDocumentById(id: string): Promise<StoredMangaDocument |
 }
 
 export async function getAllDocuments(forceRefresh: boolean = false): Promise<StoredMangaDocument[]> {
-  const user = getCurrentUser();
+  const user = getCachedUser();
   if (!user) return [];
 
   if (documentCache && !forceRefresh) {
@@ -241,7 +241,7 @@ export async function deleteDatabaseForUser(email: string): Promise<void> {
 
 
 function getLastActiveDocKey(): string | null {
-    const user = getCurrentUser();
+    const user = getCachedUser();
     if (!user) return null;
     return `${LAST_ACTIVE_DOC_KEY_BASE}_${user.email}`;
 }

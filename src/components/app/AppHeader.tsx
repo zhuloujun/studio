@@ -29,13 +29,18 @@ export function AppHeader() {
   const dictionary = getDictionary(locale);
 
   useEffect(() => {
-    const currentUser = getCurrentUser();
-    setUser(currentUser);
-    setIsAdmin(isAdminSessionActive());
+    let cancelled = false;
+    (async () => {
+      const [currentUser, adminActive] = await Promise.all([getCurrentUser(), isAdminSessionActive()]);
+      if (cancelled) return;
+      setUser(currentUser);
+      setIsAdmin(adminActive);
 
-    if (!currentUser && PROTECTED_ROUTES.some(route => pathname.startsWith(route))) {
-      router.replace('/');
-    }
+      if (!currentUser && PROTECTED_ROUTES.some(route => pathname.startsWith(route))) {
+        router.replace('/');
+      }
+    })();
+    return () => { cancelled = true; };
   }, [pathname, router]);
   
   useEffect(() => {

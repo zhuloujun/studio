@@ -50,7 +50,9 @@ export default function LoginPage() {
     generateCaptcha();
   }, []);
 
-  const handleLogin = () => {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const handleLogin = async () => {
     setError('');
 
     if (parseInt(captchaAnswer, 10) !== num1 + num2) {
@@ -59,7 +61,9 @@ export default function LoginPage() {
         return;
     }
 
-    const result = loginUser(email, password, 'user'); // Specify login type
+    setIsSubmitting(true);
+    const result = await loginUser(email, password);
+    setIsSubmitting(false);
     if (result.success) {
       if (rememberMe) {
         LocalStorageService.saveRememberedEmail(email);
@@ -69,7 +73,7 @@ export default function LoginPage() {
       toast({ title: loginDict.loginSuccessful });
       router.push('/library');
     } else {
-      setError(result.message);
+      setError(result.message || loginDict.loginFailed);
       generateCaptcha();
     }
   };
@@ -125,8 +129,8 @@ export default function LoginPage() {
             <Label htmlFor="remember-me" className="text-sm font-normal cursor-pointer">{loginDict.rememberEmail}</Label>
           </div>
            {error && <p className="text-sm text-destructive flex items-center gap-2"><AlertCircle className="h-4 w-4" />{error}</p>}
-          <Button onClick={handleLogin} className="w-full">
-            {dictionary.nav.login}
+          <Button onClick={handleLogin} className="w-full" disabled={isSubmitting}>
+            {isSubmitting ? '登录中...' : dictionary.nav.login}
           </Button>
         </CardContent>
         <CardFooter className="flex justify-center">

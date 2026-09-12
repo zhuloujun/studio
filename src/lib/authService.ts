@@ -1,249 +1,153 @@
-
-import type { User, FailedLoginAttempt } from '@/types';
-import bcrypt from 'bcryptjs';
+// src/lib/authService.ts
+// Client-side wrapper around the server API (D1 + Resend backed). No secrets
+// or user data live in the browser anymore - only an httpOnly session cookie
+// that the browser sends automatically with every request.
 import { deleteDatabaseForUser, logoutAndClearPromises } from '@/lib/indexedDBService';
 import { removeAllDataForUser } from '@/lib/localStorageService';
 
-const USERS_KEY = 'mangaTalk_users';
-const CURRENT_USER_KEY = 'mangaTalk_currentUser';
-const ADMIN_SESSION_KEY = 'mangaTalk_adminSession';
-const FAILED_LOGIN_ATTEMPTS_KEY = 'mangaTalk_failedLoginAttempts';
+type ApiResult = { success: boolean; message?: string };
 
-const ADMIN_EMAIL = process.env.NEXT_PUBLIC_ADMIN_EMAIL || 'laotouerle@outlook.com';
-const DEFAULT_ADMIN_PASSWORD = process.env.NEXT_PUBLIC_DEFAULT_ADMIN_PASSWORD || 'wvvCg95S$8Bvvw1!l0OD*,~-rtnnm@a&8A4Z299';
+// --- Local (per-browser) cache of "who's using this browser" ---
+// IMPORTANT: this is NOT a security/auth mechanism - it is only used to pick
+// which local IndexedDB/localStorage namespace to read/write (per-user
+// reading progress, favorites, etc. that live only in this browser). The
+// actual authentication/authorization decision always comes from the
+// httpOnly session cookie, verified server-side via /api/auth/me.
+const CACHED_EMAIL_KEY = 'mangaTalk_cachedUserEmail';
 
-
-// --- Brute-force protection settings ---
-const MAX_LOGIN_ATTEMPTS = 5; 
-const LOCKOUT_PERIOD_MINUTES = 10;
-const LOCKOUT_DURATION_MINUTES = 30;
-
-// --- Helper Functions ---
-
-const getUsers = (): User[] => {
-  if (typeof window === 'undefined') return [];
-  const usersJson = localStorage.getItem(USERS_KEY);
-  return usersJson ? JSON.parse(usersJson) : [];
-};
-
-const saveUsers = (users: User[]) => {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-};
-
-/**
- * Ensures the admin user exists in the user list, creating it if necessary.
- * This function should be called before any operation that relies on the admin user existing.
- */
-const ensureAdminUserExists = () => {
-    if (typeof window === 'undefined' || !ADMIN_EMAIL) return;
-    
-    let users = getUsers();
-    const adminUserIndex = users.findIndex(u => u.email.toLowerCase() === ADMIN_EMAIL.toLowerCase());
-
-    if (adminUserIndex === -1) {
-        console.log("[AuthService] Admin user not found, creating with default password.");
-        const newAdminPasswordHash = bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 8);
-        users.push({ email: ADMIN_EMAIL, passwordHash: newAdminPasswordHash });
-        saveUsers(users);
-    }
-};
-
-
-const getFailedAttempts = (): Record<string, FailedLoginAttempt> => {
-    if (typeof window === 'undefined') return {};
-    const attemptsJson = localStorage.getItem(FAILED_LOGIN_ATTEMPTS_KEY);
-    return attemptsJson ? JSON.parse(attemptsJson) : {};
-};
-
-const saveFailedAttempts = (attempts: Record<string, FailedLoginAttempt>) => {
-    if (typeof window === 'undefined') return;
-    localStorage.setItem(FAILED_LOGIN_ATTEMPTS_KEY, JSON.stringify(attempts));
-};
-
-
-// --- User & Auth Functions ---
-
-export const registerUser = (email: string, password: string): { success: boolean; message: string } => {
-  ensureAdminUserExists(); // Make sure admin account is set up before adding new users.
-  const users = getUsers();
-  if (users.find(u => u.email.toLowerCase() === email.toLowerCase())) {
-    return { success: false, message: 'User with this email already exists.' };
-  }
-  const passwordHash = bcrypt.hashSync(password, 8);
-  users.push({ email, passwordHash });
-  saveUsers(users);
-  return { success: true, message: 'User registered successfully.' };
-};
-
-export const loginUser = (email: string, password: string, type: 'user' | 'admin'): { success: boolean; message: string } => {
-  const lowerCaseEmail = email.toLowerCase();
-  const isAdminLoginAttempt = lowerCaseEmail === ADMIN_EMAIL.toLowerCase();
-
-  if (type === 'user' && isAdminLoginAttempt) {
-    return { success: false, message: "该账户无法登录" };
-  }
-  if (type === 'admin' && !isAdminLoginAttempt) {
-    return { success: false, message: "该账户无法登录" };
-  }
-
-  const attempts = getFailedAttempts();
-  const userAttempt = attempts[lowerCaseEmail];
-  const now = Date.now();
-
-  if (userAttempt && userAttempt.lockedUntil && now < userAttempt.lockedUntil) {
-      const minutesRemaining = Math.ceil((userAttempt.lockedUntil - now) / (1000 * 60));
-      return { success: false, message: `Account is locked. Please try again in ${minutesRemaining} minutes.` };
-  }
-
-  ensureAdminUserExists(); // Ensure admin user is available for login.
-  const users = getUsers();
-  const user = users.find(u => u.email.toLowerCase() === lowerCaseEmail);
-
-  if (!user || !user.passwordHash || !bcrypt.compareSync(password, user.passwordHash)) {
-      // Self-healing for admin password corruption on new deployments
-      if (isAdminLoginAttempt && password === DEFAULT_ADMIN_PASSWORD) {
-          console.warn("[AuthService] Admin default password login failed. Attempting self-heal.");
-          const correctHash = bcrypt.hashSync(DEFAULT_ADMIN_PASSWORD, 8);
-          const userIndex = users.findIndex(u => u.email.toLowerCase() === lowerCaseEmail);
-          
-          if (userIndex !== -1) {
-              users[userIndex].passwordHash = correctHash;
-              saveUsers(users);
-              
-              // Now that the password is fixed, proceed with a successful login.
-              localStorage.setItem(CURRENT_USER_KEY, JSON.stringify({ email: users[userIndex].email }));
-              if (isAdminLoginAttempt) localStorage.setItem(ADMIN_SESSION_KEY, 'true');
-              delete attempts[lowerCaseEmail];
-              saveFailedAttempts(attempts);
-              return { success: true, message: 'Admin password recovered and login successful.' };
-          }
-      }
-    
-    // --- Standard failed login attempt logic ---
-    let newAttemptCount = 1;
-    if (userAttempt) {
-        const minutesSinceLastAttempt = (now - userAttempt.firstAttemptTimestamp) / (1000 * 60);
-        if (minutesSinceLastAttempt > LOCKOUT_PERIOD_MINUTES) {
-            newAttemptCount = 1;
-        } else {
-            newAttemptCount = userAttempt.count + 1;
-        }
-    }
-
-    if (newAttemptCount >= MAX_LOGIN_ATTEMPTS) {
-        attempts[lowerCaseEmail] = {
-            count: newAttemptCount,
-            firstAttemptTimestamp: userAttempt?.firstAttemptTimestamp || now,
-            lockedUntil: now + LOCKOUT_DURATION_MINUTES * 60 * 1000,
-        };
-        saveFailedAttempts(attempts);
-        return { success: false, message: `Too many failed attempts. Account has been locked for ${LOCKOUT_DURATION_MINUTES} minutes.` };
-    } else {
-        attempts[lowerCaseEmail] = {
-            count: newAttemptCount,
-            firstAttemptTimestamp: newAttemptCount === 1 ? now : (userAttempt?.firstAttemptTimestamp || now),
-        };
-        saveFailedAttempts(attempts);
-    }
-      
-    return { success: false, message: `Invalid email or password. Attempt ${newAttemptCount} of ${MAX_LOGIN_ATTEMPTS}.` };
-  }
-  
-  // --- Successful Login ---
-  delete attempts[lowerCaseEmail];
-  saveFailedAttempts(attempts);
-  
-  localStorage.setItem(CURRENT_USER_KEY, JSON.stringify({ email: user.email }));
-
-  if (isAdminLoginAttempt) {
-    localStorage.setItem(ADMIN_SESSION_KEY, 'true');
-  } else {
-    localStorage.removeItem(ADMIN_SESSION_KEY);
-  }
-  
-  return { success: true, message: 'Login successful.' };
-};
-
-export const logout = () => {
-  if (typeof window === 'undefined') return;
-  const user = getCurrentUser();
-  
-  // Clear user-specific data from localStorage and IndexedDB before removing the user key
-  if (user) {
-    logoutAndClearPromises(); // Clear DB connections and caches
-  }
-  
-  // Now, remove the user session keys
-  localStorage.removeItem(CURRENT_USER_KEY);
-  localStorage.removeItem(ADMIN_SESSION_KEY);
-};
-
-export const getCurrentUser = (): { email: string } | null => {
+export const getCachedUser = (): { email: string } | null => {
   if (typeof window === 'undefined') return null;
-  const user = localStorage.getItem(CURRENT_USER_KEY);
-  return user ? JSON.parse(user) : null;
+  const email = window.localStorage.getItem(CACHED_EMAIL_KEY);
+  return email ? { email } : null;
 };
 
-export const changeUserPassword = (email: string, newPassword: string): boolean => {
-    const users = getUsers();
-    const userIndex = users.findIndex(u => u.email.toLowerCase() === email.toLowerCase());
-    
-    if (userIndex === -1) {
-        return false; // User not found
+const setCachedUser = (email: string | null) => {
+  if (typeof window === 'undefined') return;
+  if (email) window.localStorage.setItem(CACHED_EMAIL_KEY, email);
+  else window.localStorage.removeItem(CACHED_EMAIL_KEY);
+};
+
+async function postJson<T extends ApiResult>(url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = (await res.json().catch(() => ({}))) as T;
+  if (!res.ok && data.success === undefined) {
+    return { success: false, message: '网络错误，请稍后重试。' } as T;
+  }
+  return data;
+}
+
+// --- Registration (email OTP required) ---
+
+export const requestRegisterOtp = (email: string) =>
+  postJson<ApiResult>('/api/auth/register/request-otp', { email });
+
+export const verifyRegisterOtp = async (email: string, code: string, password: string) => {
+  const result = await postJson<ApiResult & { email?: string }>('/api/auth/register/verify', { email, code, password });
+  if (result.success) setCachedUser(result.email || email);
+  return result;
+};
+
+// --- Regular user login (no OTP) ---
+
+export const loginUser = async (email: string, password: string) => {
+  const result = await postJson<ApiResult>('/api/auth/login', { email, password });
+  if (result.success) setCachedUser(email);
+  return result;
+};
+
+// --- Admin login (password, then email OTP, every time) ---
+
+export const requestAdminLoginOtp = (email: string, password: string) =>
+  postJson<ApiResult>('/api/auth/admin/login', { email, password });
+
+export const verifyAdminLoginOtp = async (email: string, code: string) => {
+  const result = await postJson<ApiResult>('/api/auth/admin/verify-otp', { email, code });
+  if (result.success) setCachedUser(email);
+  return result;
+};
+
+// --- Change password while logged in (email OTP required, applies to both
+//     regular users and the admin account) ---
+
+export const requestPasswordChangeOtp = () => postJson<ApiResult>('/api/auth/password/request-otp');
+
+export const changePassword = (code: string, newPassword: string) =>
+  postJson<ApiResult>('/api/auth/password/change', { code, newPassword });
+
+// --- Session ---
+
+export const logout = async (): Promise<void> => {
+  try {
+    const me = await getCurrentUser();
+    if (me) {
+      logoutAndClearPromises(); // clear local IndexedDB connections/caches for this browser
     }
-
-    // Generate the hash for the new password
-    const newPasswordHash = bcrypt.hashSync(newPassword, 8);
-    
-    // Update the user's password hash in the array
-    users[userIndex].passwordHash = newPasswordHash;
-    
-    // Save the updated users array back to localStorage
-    saveUsers(users);
-    
-    return true; // Password changed successfully
+  } finally {
+    setCachedUser(null);
+    await postJson<ApiResult>('/api/auth/logout');
+  }
 };
 
-// --- Admin Functions ---
-
-export const isAdminSessionActive = (): boolean => {
-    if (typeof window === 'undefined') return false;
-    const session = localStorage.getItem(ADMIN_SESSION_KEY);
-    const currentUser = getCurrentUser();
-    return session === 'true' && !!currentUser && currentUser.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+export const getCurrentUser = async (): Promise<{ email: string } | null> => {
+  try {
+    const res = await fetch('/api/auth/me', { credentials: 'include' });
+    const data = (await res.json()) as { user: { email: string } | null };
+    return data.user ?? null;
+  } catch {
+    return null;
+  }
 };
 
-export const getAllUsersForAdmin = (): Omit<User, 'passwordHash'>[] => {
-    if (!isAdminSessionActive()) return [];
-    return getUsers()
-      .filter(u => u.email.toLowerCase() !== ADMIN_EMAIL.toLowerCase())
-      .map(({ email }) => ({ email }));
+export const isAdminSessionActive = async (): Promise<boolean> => {
+  try {
+    const res = await fetch('/api/auth/me', { credentials: 'include' });
+    const data = (await res.json()) as { isAdmin?: boolean };
+    return !!data.isAdmin;
+  } catch {
+    return false;
+  }
+};
+
+// --- Admin management ---
+
+export const getAllUsersForAdmin = async (): Promise<{ email: string }[]> => {
+  try {
+    const res = await fetch('/api/admin/users', { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { users?: { email: string }[] };
+    return data.users ?? [];
+  } catch {
+    return [];
+  }
 };
 
 export const deleteUserByAdmin = async (email: string): Promise<{ success: boolean; message?: string }> => {
-    if (!isAdminSessionActive() || email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-        return { success: false, message: "Permission denied." };
-    }
-
-    try {
+  try {
+    const res = await fetch(`/api/admin/users/${encodeURIComponent(email)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    const data = (await res.json()) as ApiResult;
+    if (data.success) {
+      // Best-effort cleanup of this browser's local data for that account.
+      try {
         await deleteDatabaseForUser(email);
         removeAllDataForUser(email);
-
-        let users = getUsers();
-        users = users.filter(u => u.email.toLowerCase() !== email.toLowerCase());
-        saveUsers(users);
-        
-        return { success: true };
-    } catch (error: any) {
-        console.error(`[AuthService] Failed to delete user ${email}:`, error);
-        return { success: false, message: error.message };
+      } catch (e) {
+        console.warn('[authService] local cleanup after delete failed', e);
+      }
     }
+    return data;
+  } catch (error: any) {
+    return { success: false, message: error?.message };
+  }
 };
 
 export const getAdminLoginUrl = (): string => {
-    if (typeof window === 'undefined') return '/i1lbklewq-6b24678_vvw019-qo0liuuu_w5sc2467-8do1yyvvye7z2nnmai17yt8b13hnhm_o01-ilylcgylbgc99';
-    // This is the correct, updated admin login URL.
-    return '/i1lbklewq-6b24678_vvw019-qo0liuuu_w5sc2467-8do1yyvvye7z2nnmai17yt8b13hnhm_o01-ilylcgylbgc99';
+  return '/login/i1lbklewq-6b24678_vvw019-qo0liuuu_w5sc2467-8do1yyvvye7z2nnmai17yt8b13hnhm_o01-ilylcgylbgc99';
 };
-

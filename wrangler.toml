@@ -2,3 +2,20 @@ name = "studio"
 compatibility_flags = ["nodejs_compat"]
 compatibility_date = "2024-01-26"
 pages_build_output_dir = ".vercel/output/static"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "studio_db"
+database_id = "5f3b76cb-a1ef-4577-ab50-e831f7358913"
+
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "studio-uploads"
+
+[vars]
+ADMIN_EMAIL = "laotouerle@outlook.com"
+RESEND_FROM_EMAIL = "MangaTalk <noreply@1258099.xyz>"
+
+# RESEND_API_KEY is a SECRET, not committed here. Set it in the Cloudflare
+# dashboard: Workers & Pages -> studio -> Settings -> Environment variables
+# -> add "RESEND_API_KEY" as an Encrypted variable (or `wrangler pages secret put RESEND_API_KEY`).

@@ -51,9 +51,15 @@ export default function HomePage() {
     const dictionary = getDictionary(locale);
 
     useEffect(() => {
-        // This check runs only on the client-side
-        setIsLoggedIn(!!getCurrentUser());
-        setIsLoading(false);
+        let cancelled = false;
+        (async () => {
+          // This check runs only on the client-side
+          const user = await getCurrentUser();
+          if (cancelled) return;
+          setIsLoggedIn(!!user);
+          setIsLoading(false);
+        })();
+        return () => { cancelled = true; };
     }, []);
 
     const modules = [

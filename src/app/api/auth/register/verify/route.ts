@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
+import { hashPassword } from '@/lib/passwordHash';
 import { getEnv } from '@/lib/cloudflare';
 import { verifyOtp, normalizeEmail } from '@/lib/otpService';
 import { createSession, sessionCookieHeader } from '@/lib/sessionService';
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     }
 
     const id = crypto.randomUUID();
-    const passwordHash = bcrypt.hashSync(password, 8);
+    const passwordHash = await hashPassword(password);
     const now = Date.now();
 
     await env.DB.prepare(

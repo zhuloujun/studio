@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
+import { verifyPassword } from '@/lib/passwordHash';
 import { getEnv } from '@/lib/cloudflare';
 import { normalizeEmail, requestOtp, OtpCooldownError } from '@/lib/otpService';
 import { checkLockout, recordFailedAttempt, MAX_LOGIN_ATTEMPTS } from '@/lib/loginAttemptService';
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
       .bind(normalizedEmail)
       .first<{ password_hash: string }>();
 
-    if (!admin || !bcrypt.compareSync(password, admin.password_hash)) {
+    if (!admin || !await verifyPassword(password, admin.password_hash)) {
       const { attemptCount } = await recordFailedAttempt(normalizedEmail);
       return NextResponse.json(
         { success: false, message: `邮箱或密码错误。第 ${attemptCount} / ${MAX_LOGIN_ATTEMPTS} 次尝试。` },

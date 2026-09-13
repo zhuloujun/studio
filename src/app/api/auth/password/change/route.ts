@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import bcrypt from 'bcryptjs';
+import { hashPassword } from '@/lib/passwordHash';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { verifyOtp } from '@/lib/otpService';
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     }
 
     const env = getEnv();
-    const passwordHash = bcrypt.hashSync(newPassword, 8);
+    const passwordHash = await hashPassword(newPassword);
     await env.DB.prepare(`UPDATE users SET password_hash = ?1 WHERE id = ?2`)
       .bind(passwordHash, session.userId)
       .run();

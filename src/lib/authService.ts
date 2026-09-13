@@ -23,7 +23,14 @@ export const getCachedUser = (): { email: string } | null => {
 
 const setCachedUser = (email: string | null) => {
   if (typeof window === 'undefined') return;
-  if (email) window.localStorage.setItem(CACHED_EMAIL_KEY, email);
+  // Always normalize the same way the server does, so the same account
+  // maps to the same local IndexedDB/localStorage namespace regardless of
+  // how the person happened to type their email this time (e.g. "Foo@Bar.com"
+  // at registration vs "foo@bar.com" on a later login would otherwise look
+  // like two different users to the browser's local storage, making
+  // previously-saved documents/settings appear to "disappear").
+  const normalized = email ? email.trim().toLowerCase() : null;
+  if (normalized) window.localStorage.setItem(CACHED_EMAIL_KEY, normalized);
   else window.localStorage.removeItem(CACHED_EMAIL_KEY);
 };
 

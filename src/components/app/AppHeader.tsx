@@ -47,8 +47,8 @@ export function AppHeader() {
     setIsSheetOpen(false);
   }, [pathname]);
 
-  const handleLogout = () => {
-    logout();
+  const handleLogout = async () => {
+    await logout();
     // Force a full page reload to the homepage.
     // This is the most reliable way to clear all state and avoid client/server mismatches
     // that can cause "Failed to fetch" errors on navigation after logout.

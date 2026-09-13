@@ -5,8 +5,6 @@ import { normalizeEmail } from '@/lib/otpService';
 import { createSession, sessionCookieHeader } from '@/lib/sessionService';
 import { checkLockout, recordFailedAttempt, clearAttempts, MAX_LOGIN_ATTEMPTS } from '@/lib/loginAttemptService';
 
-export const runtime = 'edge';
-
 export async function POST(req: NextRequest) {
   try {
     const { email, password } = (await req.json()) as { email?: string; password?: string };

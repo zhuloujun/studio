@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { requestOtp, OtpCooldownError } from '@/lib/otpService';
 
-export const runtime = 'edge';
-
 // Requires an active session (regular user or admin). The email is taken from
 // the session, never from the request body, so a user can't request a code
 // for someone else's inbox.

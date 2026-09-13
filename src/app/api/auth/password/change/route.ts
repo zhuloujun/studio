@@ -4,8 +4,6 @@ import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { verifyOtp } from '@/lib/otpService';
 
-export const runtime = 'edge';
-
 export async function POST(req: NextRequest) {
   try {
     const sessionId = req.cookies.get(SESSION_COOKIE)?.value;

@@ -23,3 +23,11 @@ const nextConfig: NextConfig = {
 };
 
 export default nextConfig;
+
+// Enables `next dev` to talk to local Cloudflare bindings (D1/R2/etc) via
+// wrangler's local emulation. Must NOT run during production builds - it
+// spins up a local workerd instance which has no place in `next build`.
+import { initOpenNextCloudflareForDev } from '@opennextjs/cloudflare';
+if (process.env.NODE_ENV === 'development') {
+  initOpenNextCloudflareForDev();
+}

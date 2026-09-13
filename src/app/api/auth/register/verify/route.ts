@@ -4,8 +4,6 @@ import { getEnv } from '@/lib/cloudflare';
 import { verifyOtp, normalizeEmail } from '@/lib/otpService';
 import { createSession, sessionCookieHeader } from '@/lib/sessionService';
 
-export const runtime = 'edge';
-
 export async function POST(req: NextRequest) {
   try {
     const { email, code, password } = (await req.json()) as { email?: string; code?: string; password?: string };

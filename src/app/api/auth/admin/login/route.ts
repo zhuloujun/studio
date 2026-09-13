@@ -4,8 +4,6 @@ import { getEnv } from '@/lib/cloudflare';
 import { normalizeEmail, requestOtp, OtpCooldownError } from '@/lib/otpService';
 import { checkLockout, recordFailedAttempt, MAX_LOGIN_ATTEMPTS } from '@/lib/loginAttemptService';
 
-export const runtime = 'edge';
-
 // Step 1 of admin login: verify email + password, then email an OTP.
 // No session is created here - that only happens after /api/auth/admin/verify-otp succeeds.
 export async function POST(req: NextRequest) {

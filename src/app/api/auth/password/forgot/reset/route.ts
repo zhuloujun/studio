@@ -3,8 +3,6 @@ import { getEnv } from '@/lib/cloudflare';
 import { normalizeEmail, verifyOtp } from '@/lib/otpService';
 import { hashPassword } from '@/lib/passwordHash';
 
-export const runtime = 'edge';
-
 export async function POST(req: NextRequest) {
   try {
     const { email, code, newPassword } = (await req.json()) as { email?: string; code?: string; newPassword?: string };

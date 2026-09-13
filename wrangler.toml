@@ -1,7 +1,11 @@
 name = "studio"
+main = ".open-next/worker.js"
+compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
-compatibility_date = "2024-01-26"
-pages_build_output_dir = ".vercel/output/static"
+
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
 
 [[d1_databases]]
 binding = "DB"
@@ -16,6 +20,6 @@ bucket_name = "studio-uploads"
 ADMIN_EMAIL = "laotouerle@outlook.com"
 RESEND_FROM_EMAIL = "MangaTalk <noreply@1258099.xyz>"
 
-# RESEND_API_KEY is a SECRET, not committed here. Set it in the Cloudflare
-# dashboard: Workers & Pages -> studio -> Settings -> Environment variables
-# -> add "RESEND_API_KEY" as an Encrypted variable (or `wrangler pages secret put RESEND_API_KEY`).
+# RESEND_API_KEY is a SECRET, not committed here. Set it with:
+#   npx wrangler secret put RESEND_API_KEY
+# or in the Cloudflare dashboard: Workers & Pages -> studio -> Settings -> Variables and Secrets.

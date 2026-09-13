@@ -2,8 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { requestOtp, normalizeEmail, OtpCooldownError } from '@/lib/otpService';
 
-export const runtime = 'edge';
-
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function POST(req: NextRequest) {

@@ -3,8 +3,6 @@ import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { normalizeEmail } from '@/lib/otpService';
 
-export const runtime = 'edge';
-
 export async function DELETE(req: NextRequest, { params }: { params: { email: string } }) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
   const session = await getSession(sessionId);

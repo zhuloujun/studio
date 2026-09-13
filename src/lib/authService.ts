@@ -116,6 +116,44 @@ export const requestForgotPasswordOtp = (email: string) =>
 export const resetForgottenPassword = (email: string, code: string, newPassword: string) =>
   postJson<ApiResult>('/api/auth/password/forgot/reset', { email, code, newPassword });
 
+// --- Admin forgot password (logged out, single fixed admin account) ---
+
+export const requestAdminForgotPasswordOtp = () => postJson<ApiResult>('/api/auth/admin/forgot/request-otp');
+
+export const resetAdminForgottenPassword = (code: string, newPassword: string) =>
+  postJson<ApiResult>('/api/auth/admin/forgot/reset', { code, newPassword });
+
+// --- Admin login URL (view/change the secret admin login path) ---
+
+export const checkAdminLoginSlug = async (slug: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`/api/auth/admin/check-login-slug?slug=${encodeURIComponent(slug)}`, {
+      credentials: 'include',
+    });
+    const data = (await res.json()) as { valid?: boolean };
+    return !!data.valid;
+  } catch {
+    return false;
+  }
+};
+
+export const getAdminLoginUrlInfo = async (): Promise<{ slug: string; path: string } | null> => {
+  try {
+    const res = await fetch('/api/admin/login-url', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { success: boolean; slug?: string; path?: string };
+    if (!data.success || !data.slug || !data.path) return null;
+    return { slug: data.slug, path: data.path };
+  } catch {
+    return null;
+  }
+};
+
+export const requestAdminLoginUrlChangeOtp = () => postJson<ApiResult>('/api/admin/login-url/request-otp');
+
+export const changeAdminLoginUrl = (code: string, newSlug: string) =>
+  postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { code, newSlug });
+
 // --- Session ---
 
 export const logout = async (): Promise<void> => {
@@ -186,5 +224,7 @@ export const deleteUserByAdmin = async (email: string): Promise<{ success: boole
 };
 
 export const getAdminLoginUrl = (): string => {
+  // Deprecated: the admin login URL is now dynamic/configurable. Kept only
+  // as a fallback default; use getAdminLoginUrlInfo() for the real current path.
   return '/login/i1lbklewq-6b24678_vvw019-qo0liuuu_w5sc2467-8do1yyvvye7z2nnmai17yt8b13hnhm_o01-ilylcgylbgc99';
 };

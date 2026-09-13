@@ -101,6 +101,14 @@ export const requestPasswordChangeOtp = () => postJson<ApiResult>('/api/auth/pas
 export const changePassword = (code: string, newPassword: string) =>
   postJson<ApiResult>('/api/auth/password/change', { code, newPassword });
 
+// --- Forgot password (logged out, regular users only, email OTP) ---
+
+export const requestForgotPasswordOtp = (email: string) =>
+  postJson<ApiResult>('/api/auth/password/forgot/request-otp', { email });
+
+export const resetForgottenPassword = (email: string, code: string, newPassword: string) =>
+  postJson<ApiResult>('/api/auth/password/forgot/reset', { email, code, newPassword });
+
 // --- Session ---
 
 export const logout = async (): Promise<void> => {

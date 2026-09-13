@@ -49,6 +49,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: err.message }, { status: 429 });
     }
     console.error('[admin/login]', err);
-    return NextResponse.json({ success: false, message: '登录失败，请稍后重试。' }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: '登录失败，请稍后重试。', debug: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
   }
 }

@@ -5,7 +5,7 @@
 import { deleteDatabaseForUser, logoutAndClearPromises } from '@/lib/indexedDBService';
 import { removeAllDataForUser } from '@/lib/localStorageService';
 
-type ApiResult = { success: boolean; message?: string };
+type ApiResult = { success: boolean; message?: string; debug?: string };
 
 // --- Local (per-browser) cache of "who's using this browser" ---
 // IMPORTANT: this is NOT a security/auth mechanism - it is only used to pick
@@ -28,15 +28,37 @@ const setCachedUser = (email: string | null) => {
 };
 
 async function postJson<T extends ApiResult>(url: string, body?: unknown): Promise<T> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = (await res.json().catch(() => ({}))) as T;
-  if (!res.ok && data.success === undefined) {
-    return { success: false, message: '网络错误，请稍后重试。' } as T;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    // fetch() itself threw - true network failure (offline, DNS, CORS block, etc.)
+    return { success: false, message: `网络请求失败：${e instanceof Error ? e.message : String(e)}` } as T;
+  }
+
+  const text = await res.text();
+  let data: T;
+  try {
+    data = JSON.parse(text) as T;
+  } catch {
+    // The response wasn't JSON at all - likely an edge/WAF block page or an
+    // unhandled crash, not something our API code produced.
+    return {
+      success: false,
+      message: `服务器返回了非预期内容（HTTP ${res.status}），可能是 Cloudflare 安全规则拦截或函数崩溃。`,
+      debug: text.slice(0, 300),
+    } as T;
+  }
+
+  // Surface the temporary debug field (if the server included one) directly
+  // in the message so it's visible without opening DevTools.
+  if (data.debug && data.message) {
+    data.message = `${data.message}（详细原因：${data.debug}）`;
   }
   return data;
 }

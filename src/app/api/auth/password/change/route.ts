@@ -36,6 +36,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, message: '密码已更新。' });
   } catch (err) {
     console.error('[password/change]', err);
-    return NextResponse.json({ success: false, message: '修改密码失败，请稍后重试。' }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: '修改密码失败，请稍后重试。', debug: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
   }
 }

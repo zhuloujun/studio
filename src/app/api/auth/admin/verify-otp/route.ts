@@ -40,6 +40,9 @@ export async function POST(req: NextRequest) {
     return res;
   } catch (err) {
     console.error('[admin/verify-otp]', err);
-    return NextResponse.json({ success: false, message: '验证失败，请稍后重试。' }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: '验证失败，请稍后重试。', debug: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
   }
 }

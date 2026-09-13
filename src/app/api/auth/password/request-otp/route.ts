@@ -22,6 +22,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: err.message }, { status: 429 });
     }
     console.error('[password/request-otp]', err);
-    return NextResponse.json({ success: false, message: '发送验证码失败，请稍后重试。' }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: '发送验证码失败，请稍后重试。', debug: err instanceof Error ? err.message : String(err) },
+      { status: 500 }
+    );
   }
 }

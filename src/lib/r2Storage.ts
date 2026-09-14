@@ -15,7 +15,11 @@ export function mediaR2Key(userId: string, mediaId: string): string {
   return `media/${sanitizeIdSegment(userId)}/${sanitizeIdSegment(mediaId)}`;
 }
 
-export async function putFile(key: string, body: ArrayBuffer, contentType?: string): Promise<void> {
+export async function putFile(
+  key: string,
+  body: ArrayBuffer | ReadableStream | Blob,
+  contentType?: string
+): Promise<void> {
   const env = getEnv();
   await env.UPLOADS.put(key, body, {
     httpMetadata: contentType ? { contentType } : undefined,

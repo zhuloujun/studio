@@ -31,6 +31,7 @@ export interface StoredDocumentBase {
   id: string;
   title: string; // Original file name will be used as title
   fileData: ArrayBuffer; // Store actual file content
+  fileUrl?: string; // Streaming URL to fetch/re-fetch the raw bytes from (server-backed documents only)
   originalType: string; // e.g., 'image/png', 'application/pdf', 'application/epub+zip', 'text/plain'
   createdAt: number;
   annotations?: Annotation[]; // Array to hold annotations

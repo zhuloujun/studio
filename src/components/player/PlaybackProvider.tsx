@@ -267,6 +267,48 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     speakNextSegment();
   }, [originalTextTtsSettings, yourNoteTtsSettings, speakNextSegment]);
   
+  const pendingVideoItemRef = useRef<MediaFavoriteItem | null>(null);
+
+  const startMediaFavoritePlayback = useCallback(async (player: HTMLAudioElement | HTMLVideoElement, mediaItem: MediaFavoriteItem) => {
+    setCurrentText(mediaItem.name);
+    if (typeof navigator !== 'undefined' && navigator.mediaSession) {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: mediaItem.name,
+          artist: mediaItem.sourceDocumentName || 'MangaTalk',
+          album: 'Media Favorites',
+        });
+    }
+    // Prefer the server-streamed URL (works for any file size, supports
+    // seeking) over building a Blob from in-memory fileData.
+    const url = mediaItem.fileUrl || URL.createObjectURL(new Blob([mediaItem.fileData], { type: mediaItem.originalType }));
+    mediaObjectUrlRef.current = mediaItem.fileUrl ? null : url;
+    player.src = url;
+    try {
+        await player.play();
+        if (typeof navigator !== 'undefined' && navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
+    } catch (e: any) {
+         if (e.name !== 'AbortError') {
+          console.error("Media playback error:", e);
+          toast({ variant: "destructive", title: "Playback Error", description: `The media file could not be played.` });
+          stop();
+        }
+    }
+  }, [stop, toast]);
+
+  // The <video> element only exists in the DOM while the floating player is
+  // showing a video (see FloatingPlayer.tsx), so on the first video playback
+  // of a session - or any time after playback was fully stopped - `videoPlayer`
+  // is briefly null exactly when play() runs. Rather than failing with
+  // "Player is not available", queue the request and fulfil it as soon as
+  // the element mounts and this effect sees it.
+  useEffect(() => {
+    if (videoPlayer && pendingVideoItemRef.current) {
+      const mediaItem = pendingVideoItemRef.current;
+      pendingVideoItemRef.current = null;
+      startMediaFavoritePlayback(videoPlayer, mediaItem);
+    }
+  }, [videoPlayer, startMediaFavoritePlayback]);
+
   const play = useCallback(async (item: PlayableItem, newPlaylist: PlayableItem[], startIndex: number) => {
     stop(false);
     
@@ -284,41 +326,29 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         setPlaylist(newPlaylist);
         setCurrentIndex(startIndex);
 
-        const player = item.item.type === 'video' ? videoPlayer : audioPlayerRef.current;
+        if (item.item.type === 'video') {
+            if (videoPlayer) {
+                await startMediaFavoritePlayback(videoPlayer, item.item);
+            } else {
+                // Video element not mounted yet this render cycle - the effect
+                // above will pick this up as soon as it is.
+                pendingVideoItemRef.current = item.item;
+            }
+            return;
+        }
+
+        const player = audioPlayerRef.current;
         if (!player) {
             toast({ variant: "destructive", title: "Playback Error", description: "Player is not available." });
             stop();
             return;
         }
-
-        setCurrentText(item.item.name);
-        if (typeof navigator !== 'undefined' && navigator.mediaSession) {
-            navigator.mediaSession.metadata = new MediaMetadata({
-              title: item.item.name,
-              artist: item.item.sourceDocumentName || 'MangaTalk',
-              album: 'Media Favorites',
-            });
-        }
-        // Prefer the server-streamed URL (works for any file size, supports
-        // seeking) over building a Blob from in-memory fileData.
-        const url = item.item.fileUrl || URL.createObjectURL(new Blob([item.item.fileData], { type: item.item.originalType }));
-        mediaObjectUrlRef.current = item.item.fileUrl ? null : url;
-        player.src = url;
-        try {
-            await player.play();
-            if (typeof navigator !== 'undefined' && navigator.mediaSession) navigator.mediaSession.playbackState = 'playing';
-        } catch (e: any) {
-             if (e.name !== 'AbortError') {
-              console.error("Media playback error:", e);
-              toast({ variant: "destructive", title: "Playback Error", description: `The media file could not be played.` });
-              stop();
-            }
-        }
+        await startMediaFavoritePlayback(player, item.item);
     } else { 
         handleTTSPlayback(item, newPlaylist, startIndex);
     }
 
-  }, [stop, videoPlayer, toast, handleTTSPlayback]);
+  }, [stop, videoPlayer, toast, handleTTSPlayback, startMediaFavoritePlayback]);
   
   const onPlaybackEnd = useCallback(() => {
     if (!isPlayingRef.current) return;

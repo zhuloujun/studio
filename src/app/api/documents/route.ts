@@ -70,9 +70,11 @@ export async function POST(req: NextRequest) {
     }
 
     const r2Key = documentR2Key(session.userId, metadata.id);
-    const fileBuffer = await file.arrayBuffer();
 
-    await putFile(r2Key, fileBuffer, metadata.originalType);
+    // Pass the Blob straight through to R2 - avoids buffering the whole
+    // file into Worker memory first, which is what made large EPUB/video
+    // uploads fail intermittently.
+    await putFile(r2Key, file, metadata.originalType);
 
     const now = Date.now();
     await env.DB.prepare(

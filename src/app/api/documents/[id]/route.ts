@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
-import { getFile, deleteFile, arrayBufferToBase64 } from '@/lib/r2Storage';
+import { deleteFile } from '@/lib/r2Storage';
 
+// Returns metadata + a streaming fileUrl - NOT the file bytes themselves.
+// (Previously this base64-encoded the whole file into the JSON response,
+// which could exceed Worker memory/resource limits for large PDFs/ebooks -
+// see /api/documents/[id]/file for why that was replaced.)
 export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
   const session = await getSession(sessionId);
@@ -12,17 +16,12 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   try {
     const env = getEnv();
-    const row = await env.DB.prepare(`SELECT user_id, r2_key, metadata_json, created_at FROM documents WHERE id = ?1`)
+    const row = await env.DB.prepare(`SELECT user_id, metadata_json, created_at FROM documents WHERE id = ?1`)
       .bind(params.id)
-      .first<{ user_id: string; r2_key: string; metadata_json: string; created_at: number }>();
+      .first<{ user_id: string; metadata_json: string; created_at: number }>();
 
     if (!row || row.user_id !== session.userId) {
       return NextResponse.json({ success: false, message: '文档不存在。' }, { status: 404 });
-    }
-
-    const fileBuffer = await getFile(row.r2_key);
-    if (!fileBuffer) {
-      return NextResponse.json({ success: false, message: '文件内容丢失。' }, { status: 404 });
     }
 
     const metadata = JSON.parse(row.metadata_json);
@@ -32,7 +31,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
         ...metadata,
         id: params.id,
         createdAt: row.created_at,
-        fileDataBase64: arrayBufferToBase64(fileBuffer),
+        fileUrl: `/api/documents/${params.id}/file`,
       },
     });
   } catch (err) {

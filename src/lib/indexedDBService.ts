@@ -24,7 +24,10 @@ let dbPromises: Map<string, Promise<IDBDatabase>> = new Map();
 let documentCache: StoredMangaDocument[] | null = null;
 let isFetching: Promise<StoredMangaDocument[]> | null = null;
 
-// --- base64 helpers (browser-safe) ---
+// --- base64 helper (browser-safe) - kept for potential future use with
+// small binary payloads; document/media file content itself is now always
+// streamed as raw bytes rather than base64-encoded (see getDocumentById /
+// getAllMediaItems below).
 function base64ToArrayBuffer(base64: string): ArrayBuffer {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
@@ -90,7 +93,7 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
   const res = await fetch('/api/documents', { method: 'POST', credentials: 'include', body: form });
   const data = (await res.json().catch(() => ({}))) as any;
   if (!data.success) {
-    throw new Error(data.message || '保存文档失败。');
+    throw new Error(data.debug ? `${data.message || '保存文档失败。'}（${data.debug}）` : (data.message || '保存文档失败。'));
   }
 }
 
@@ -100,8 +103,18 @@ export async function getDocumentById(id: string): Promise<StoredMangaDocument |
   const data = (await res.json().catch(() => ({}))) as any;
   if (!data.success || !data.document) return undefined;
 
-  const { fileDataBase64, ...rest } = data.document;
-  return { ...rest, fileData: base64ToArrayBuffer(fileDataBase64) } as StoredMangaDocument;
+  const { fileUrl, ...rest } = data.document;
+
+  // Fetch the raw bytes as a plain binary stream (NOT base64-in-JSON, which
+  // used to blow past Worker memory/resource limits for large PDFs/ebooks
+  // and produce truncated/corrupted files - see /api/documents/[id]/file).
+  const fileRes = await fetch(fileUrl, { credentials: 'include' });
+  if (!fileRes.ok) {
+    throw new Error(`获取文件内容失败 (HTTP ${fileRes.status})`);
+  }
+  const fileData = await fileRes.arrayBuffer();
+
+  return { ...rest, fileData, fileUrl } as StoredMangaDocument;
 }
 
 export async function getAllDocuments(forceRefresh: boolean = false): Promise<StoredMangaDocument[]> {
@@ -172,7 +185,7 @@ export async function saveMediaItem(item: MediaFavoriteItem): Promise<void> {
   const res = await fetch('/api/media', { method: 'POST', credentials: 'include', body: form });
   const data = (await res.json().catch(() => ({}))) as any;
   if (!data.success) {
-    throw new Error(data.message || '保存媒体失败。');
+    throw new Error(data.debug ? `${data.message || '保存媒体失败。'}（${data.debug}）` : (data.message || '保存媒体失败。'));
   }
 }
 

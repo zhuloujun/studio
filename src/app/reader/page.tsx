@@ -588,22 +588,23 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
               if (isStale) { pdf.destroy(); return; }
               const allText = pageTexts.join('\n\n').trim();
 
-              // A simple heuristic: if the total text length is less than a certain threshold per page, 
-              // it's likely a scanned/image-based PDF.
-              const isLikelyScanned = (allText.length / pdf.numPages) < 100;
-
-              if (allText.length > 0 && !isLikelyScanned) {
+              // Always keep the extracted full text around so the manual
+              // "switch to text view" button works, but default to the
+              // canvas/page-image view for every PDF - that's the only mode
+              // that preserves the original visual layout (columns, images,
+              // exact positioning). The previous behavior auto-switched to a
+              // flattened plain-text view whenever a PDF had "enough" text
+              // per page, which silently threw away the original formatting
+              // for anything that wasn't a scanned/image-only PDF - not
+              // something the reader should decide for the user.
+              if (allText.length > 0) {
                 setPdfTextContent(allText);
-                setCurrentTextForTTS(allText);
-                setIsPdfTextView(true);
-                pdf.destroy();
-              } else {
-                setIsPdfTextView(false);
-                setPdfDocProxy(pdf);
-                setPdfTotalPages(pdf.numPages);
-                const savedPageIndex = LocalStorageService.loadCurrentPdfPageIndexForDoc(doc.id);
-                setCurrentPdfPageNum((savedPageIndex > 0 && savedPageIndex <= pdf.numPages) ? savedPageIndex : 1);
               }
+              setIsPdfTextView(false);
+              setPdfDocProxy(pdf);
+              setPdfTotalPages(pdf.numPages);
+              const savedPageIndex = LocalStorageService.loadCurrentPdfPageIndexForDoc(doc.id);
+              setCurrentPdfPageNum((savedPageIndex > 0 && savedPageIndex <= pdf.numPages) ? savedPageIndex : 1);
             } catch (pdfError: any) {
               if (isStale) return;
               console.error("Error processing PDF:", pdfError);

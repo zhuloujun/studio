@@ -194,8 +194,12 @@ function MediaFavoritesPageContent() {
       : <Video className="h-6 w-6 text-primary flex-shrink-0" />;
   };
 
-  // Function to create or get an object URL for a media item
+  // Function to create or get a playable URL for a media item.
+  // Prefer the server-streamed fileUrl (works for any file size, supports
+  // seeking) over building a Blob from in-memory fileData.
   const getObjectUrl = (item: MediaFavoriteItem): string => {
+    if (item.fileUrl) return item.fileUrl;
+
     if (objectUrlRefs.current[item.id]) {
       return objectUrlRefs.current[item.id];
     }

@@ -131,6 +131,7 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [txtContent, setTxtContent] = useState<string>("");
   const [mobiHtmlContent, setMobiHtmlContent] = useState<string>("");
   const [mobiToc, setMobiToc] = useState<TocItem[]>([]);
+  const [docxHtmlContent, setDocxHtmlContent] = useState<string>("");
   const [displayedImageSrc, setDisplayedImageSrc] = useState<string | null>(null);
   const currentImageObjectUrlRef = useRef<string | null>(null);
   
@@ -534,7 +535,15 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
           case 'pdf':
             setIsLoadingDoc(true);
             try {
-              const pdf = await getDocument({ data: doc.fileData.slice(0) }).promise;
+              const pdf = await getDocument({
+                data: doc.fileData.slice(0),
+                // Without these, PDFs using embedded/non-standard fonts or
+                // certain embedded images can render with garbled layout or
+                // missing content in pdf.js's canvas renderer.
+                cMapUrl: '/pdfjs/cmaps/',
+                cMapPacked: true,
+                standardFontDataUrl: '/pdfjs/standard_fonts/',
+              }).promise;
               if (isStale) { try { pdf.destroy(); } catch(e){} return; }
 
               const pagePromises = [];
@@ -682,6 +691,25 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
             setIsLoadingDoc(false);
             break;
 
+          case 'docx':
+            try {
+                const mammoth = (await import('mammoth')).default;
+                // mammoth preserves paragraphs, headings, bold/italic, lists, tables,
+                // and embedded images (as inline data URLs) - this keeps the original
+                // Word formatting intact instead of flattening it to plain text.
+                const { value: docxHtml } = await mammoth.convertToHtml({ arrayBuffer: doc.fileData.slice(0) });
+                if (isStale) return;
+                setDocxHtmlContent(docxHtml);
+                const plainText = new DOMParser().parseFromString(docxHtml, 'text/html').body.textContent || "";
+                setCurrentTextForTTS(plainText);
+            } catch (docxError: any) {
+                if (isStale) return;
+                console.error("Error parsing DOCX:", docxError);
+                setDocErrorMessage(`Error parsing Word document: ${docxError.message}`);
+            }
+            setIsLoadingDoc(false);
+            break;
+
           default:
             setIsLoadingDoc(false);
             break;
@@ -702,6 +730,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     setTxtContent("");
     setMobiHtmlContent("");
     setMobiToc([]);
+    setDocxHtmlContent("");
     setDisplayedImageSrc(null);
     setIsEpubLoading(false);
     setCurrentTextForTTS("");
@@ -1863,6 +1892,23 @@ HighlightableContent.displayName = 'HighlightableContent';
         );
     }
 
+    if (activeDoc?.type === 'docx') {
+        return (
+             <HighlightableContent
+                ref={mainHighlightedContentRef}
+                text={docxHtmlContent}
+                textSegments={textSegments}
+                highlightedSegmentIndex={highlightedSegmentIndex}
+                isSpeaking={isSpeaking}
+                isPaused={isPaused}
+                isHtml={true}
+                className="p-4 md:p-6 max-w-none [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:text-xl [&_h2]:font-bold [&_h1]:mb-3 [&_h2]:mb-2 [&_p]:mb-3 [&_table]:border-collapse [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_img]:max-w-full"
+              >
+                <AnnotationMarkers containerRef={mainHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
+            </HighlightableContent>
+        );
+    }
+
     if (activeDoc?.type === 'image') {
         return (
             <div className="w-full h-full flex items-center justify-center">
@@ -1915,7 +1961,7 @@ HighlightableContent.displayName = 'HighlightableContent';
 
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, viewScale]);
+  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, docxHtmlContent, viewScale]);
 
   if (showInitialLoader) { 
     return <div className="flex items-center justify-center h-full flex-grow"><Loader2 className="h-12 w-12 animate-spin text-primary" /><p className="ml-4 text-lg">{readerDict.loadingDocument}</p></div>; 

@@ -132,6 +132,15 @@ function LibraryPageContent() {
         newDocument = { ...commonDocProps, type: 'epub', originalType: 'application/epub+zip' };
       } else if (file.type === 'application/x-mobipocket-ebook' || lowerCaseName.endsWith('.mobi') || lowerCaseName.endsWith('.azw') || lowerCaseName.endsWith('.azw3')) {
         newDocument = { ...commonDocProps, type: 'mobi', originalType: file.type || 'application/x-mobipocket-ebook' };
+      } else if (
+        file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        lowerCaseName.endsWith('.docx')
+      ) {
+        newDocument = {
+          ...commonDocProps,
+          type: 'docx',
+          originalType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        };
       } else if (file.type === 'text/plain' || lowerCaseName.endsWith('.txt')) {
         newDocument = { ...commonDocProps, type: 'txt', originalType: 'text/plain' };
       } else {
@@ -210,6 +219,7 @@ function LibraryPageContent() {
       case 'pdf': return <FileType2 className="h-8 w-8 text-primary flex-shrink-0" />; 
       case 'epub': return <BookOpen className="h-8 w-8 text-primary flex-shrink-0" />;
       case 'mobi': return <Book className="h-8 w-8 text-primary flex-shrink-0" />; 
+      case 'docx': return <FileType2 className="h-8 w-8 text-primary flex-shrink-0" />;
       case 'txt': return <FileText className="h-8 w-8 text-primary flex-shrink-0" />;
       default: return <FileText className="h-8 w-8 text-primary flex-shrink-0" />; 
     }
@@ -229,7 +239,7 @@ function LibraryPageContent() {
                 ref={fileInputRef}
                 id="doc-upload-library"
                 type="file"
-                accept="application/epub+zip,application/pdf,text/plain,image/*,application/x-mobipocket-ebook,.mobi,.azw,.azw3"
+                accept="application/epub+zip,application/pdf,text/plain,image/*,application/x-mobipocket-ebook,.mobi,.azw,.azw3,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx"
                 onChange={handleFileUpload}
                 disabled={isUploading || isLoading}
               />

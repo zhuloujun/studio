@@ -71,12 +71,18 @@ export interface StoredScratchpadDocument extends StoredDocumentBase {
 }
 
 
+export interface StoredDocxDocument extends StoredDocumentBase {
+  type: 'docx';
+  // Word documents are parsed to HTML (via mammoth) on open, same pattern as MOBI.
+}
+
 export type StoredMangaDocument =
   | StoredImageDocument
   | StoredPdfDocument
   | StoredEpubDocument
   | StoredMobiDocument
   | StoredTxtDocument
+  | StoredDocxDocument
   | StoredScratchpadDocument;
 
 
@@ -118,7 +124,8 @@ export interface MediaFavoriteItem {
   id: string;
   name: string;
   type: 'audio' | 'video';
-  fileData: ArrayBuffer; // Store raw file data in IndexedDB
+  fileData: ArrayBuffer; // Populated for freshly-uploaded items; may be empty for items loaded from the list (use fileUrl for playback instead)
+  fileUrl?: string; // Streaming URL for playback (preferred over fileData when present)
   originalType: string; // e.g., 'audio/mpeg'
   note: string;
   createdAt: number;

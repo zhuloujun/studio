@@ -48,6 +48,7 @@
     "framer-motion": "^11.2.12",
     "genkit": "^1.8.0",
     "lucide-react": "^0.475.0",
+    "mammoth": "^1.12.3",
     "next": "15.3.8",
     "patch-package": "^8.0.0",
     "pdfjs-dist": "^4.4.168",

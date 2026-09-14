@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
-import { mediaR2Key, putFile, getFile, arrayBufferToBase64 } from '@/lib/r2Storage';
+import { mediaR2Key, putFile } from '@/lib/r2Storage';
 
-// GET: list this user's media items, INCLUDING file bytes (base64) - mirrors
-// the previous IndexedDB behaviour of loading everything at once. For very
-// large media libraries this could be optimized to lazy-load file bytes only
-// when a specific item is played, but that would require also changing the
-// media page's consuming code.
+// GET: list this user's media items with metadata only, plus a streaming
+// fileUrl for each (NOT the raw bytes - loading every media file's full
+// content into one JSON response was the cause of the site crashing on
+// video uploads: video files are large enough to blow past memory limits
+// when base64-encoded all at once. Playback should hit fileUrl directly.)
 export async function GET(req: NextRequest) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
   const session = await getSession(sessionId);
@@ -18,23 +18,15 @@ export async function GET(req: NextRequest) {
   try {
     const env = getEnv();
     const { results } = await env.DB.prepare(
-      `SELECT id, r2_key, metadata_json, created_at FROM media_items WHERE user_id = ?1 ORDER BY created_at DESC`
+      `SELECT id, metadata_json, created_at FROM media_items WHERE user_id = ?1 ORDER BY created_at DESC`
     )
       .bind(session.userId)
-      .all<{ id: string; r2_key: string; metadata_json: string; created_at: number }>();
+      .all<{ id: string; metadata_json: string; created_at: number }>();
 
-    const items = await Promise.all(
-      (results || []).map(async (row) => {
-        const metadata = JSON.parse(row.metadata_json);
-        const fileBuffer = await getFile(row.r2_key);
-        return {
-          ...metadata,
-          id: row.id,
-          createdAt: row.created_at,
-          fileDataBase64: fileBuffer ? arrayBufferToBase64(fileBuffer) : null,
-        };
-      })
-    );
+    const items = (results || []).map((row) => {
+      const metadata = JSON.parse(row.metadata_json);
+      return { ...metadata, id: row.id, createdAt: row.created_at, fileUrl: `/api/media/${row.id}/file` };
+    });
 
     return NextResponse.json({ success: true, items });
   } catch (err) {

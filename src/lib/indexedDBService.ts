@@ -183,13 +183,13 @@ export async function getAllMediaItems(): Promise<MediaFavoriteItem[]> {
     throw new Error(data.message || '获取媒体列表失败。');
   }
 
-  return (data.items || []).map((item: any) => {
-    const { fileDataBase64, ...rest } = item;
-    return {
-      ...rest,
-      fileData: fileDataBase64 ? base64ToArrayBuffer(fileDataBase64) : new ArrayBuffer(0),
-    } as MediaFavoriteItem;
-  });
+  // Note: list items carry a streaming fileUrl instead of the raw bytes -
+  // loading every media file's full content up front (especially video) is
+  // what used to crash the app. Playback should use item.fileUrl directly.
+  return (data.items || []).map((item: any) => ({
+    ...item,
+    fileData: new ArrayBuffer(0),
+  })) as MediaFavoriteItem[];
 }
 
 export async function deleteMediaItemById(id: string): Promise<void> {

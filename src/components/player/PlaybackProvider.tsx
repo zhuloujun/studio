@@ -299,9 +299,10 @@ export const PlaybackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               album: 'Media Favorites',
             });
         }
-        const blob = new Blob([item.item.fileData], { type: item.item.originalType });
-        const url = URL.createObjectURL(blob);
-        mediaObjectUrlRef.current = url;
+        // Prefer the server-streamed URL (works for any file size, supports
+        // seeking) over building a Blob from in-memory fileData.
+        const url = item.item.fileUrl || URL.createObjectURL(new Blob([item.item.fileData], { type: item.item.originalType }));
+        mediaObjectUrlRef.current = item.item.fileUrl ? null : url;
         player.src = url;
         try {
             await player.play();

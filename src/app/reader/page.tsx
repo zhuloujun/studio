@@ -697,7 +697,27 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 // mammoth preserves paragraphs, headings, bold/italic, lists, tables,
                 // and embedded images (as inline data URLs) - this keeps the original
                 // Word formatting intact instead of flattening it to plain text.
-                const { value: docxHtml } = await mammoth.convertToHtml({ arrayBuffer: doc.fileData.slice(0) });
+                const mammothOptions = {
+                  arrayBuffer: doc.fileData.slice(0),
+                  // mammoth's defaults already map Word's built-in Heading 1-3,
+                  // bold/italic/underline, lists, tables, hyperlinks, and
+                  // embedded images. This adds a few more common Word styles
+                  // it doesn't map by default, so more of the original
+                  // structure survives the conversion to HTML.
+                  styleMap: [
+                    "p[style-name='Title'] => h1.doc-title:fresh",
+                    "p[style-name='Subtitle'] => h2.doc-subtitle:fresh",
+                    "p[style-name='Heading 4'] => h4:fresh",
+                    "p[style-name='Heading 5'] => h5:fresh",
+                    "p[style-name='Heading 6'] => h6:fresh",
+                    "p[style-name='Quote'] => blockquote:fresh",
+                    "p[style-name='Intense Quote'] => blockquote.doc-intense:fresh",
+                  ],
+                };
+                const { value: docxHtml, messages: docxMessages } = await mammoth.convertToHtml(mammothOptions);
+                if (docxMessages?.length) {
+                  console.warn('[DOCX conversion notes]', docxMessages);
+                }
                 if (isStale) return;
                 setDocxHtmlContent(docxHtml);
                 const plainText = new DOMParser().parseFromString(docxHtml, 'text/html').body.textContent || "";
@@ -1035,7 +1055,14 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                     className={cn("w-full h-full text-sm", className)}
                     style={{
                         columnWidth: scrollContainerRef.current ? `${scrollContainerRef.current.clientWidth}px` : '100vw',
-                        columnGap: '2rem', // Space between pages
+                        // IMPORTANT: this must stay 0. navigateMobi() and the TOC
+                        // jump handler both scroll/compute positions assuming
+                        // "one page" === exactly one column's width. Any nonzero
+                        // gap here makes the real column pitch (columnWidth + gap)
+                        // larger than what those calculations use, so the error
+                        // accumulates every page turn until two partial pages end
+                        // up visible at once.
+                        columnGap: '0px',
                         height: '100%',
                         overflow: 'hidden', // Hide the default vertical scrollbar
                     }}
@@ -1902,7 +1929,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                 isSpeaking={isSpeaking}
                 isPaused={isPaused}
                 isHtml={true}
-                className="p-4 md:p-6 max-w-none [&_h1]:text-2xl [&_h1]:font-bold [&_h2]:text-xl [&_h2]:font-bold [&_h1]:mb-3 [&_h2]:mb-2 [&_p]:mb-3 [&_table]:border-collapse [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_img]:max-w-full"
+                className="p-4 md:p-6 max-w-none leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_h4]:text-base [&_h4]:font-bold [&_h4]:mt-3 [&_h4]:mb-1 [&_h5]:text-base [&_h5]:font-semibold [&_h6]:text-sm [&_h6]:font-semibold [&_p]:mb-3 [&_strong]:font-bold [&_em]:italic [&_u]:underline [&_a]:text-primary [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 [&_blockquote]:border-l-4 [&_blockquote]:border-muted-foreground/30 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:my-3 [&_table]:border-collapse [&_table]:mb-3 [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_th]:bg-muted [&_th]:font-semibold [&_img]:max-w-full [&_img]:h-auto [&_img]:my-3 [&_hr]:my-4"
               >
                 <AnnotationMarkers containerRef={mainHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
             </HighlightableContent>

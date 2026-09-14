@@ -48,7 +48,7 @@ import {
 import { getCloudSpeech, performOCR } from '@/app/actions';
 import * as LocalStorageService from '@/lib/localStorageService';
 import * as IndexedDBService from '@/lib/indexedDBService';
-import { MobiParser } from '@/lib/mobiParser';
+import { initMobiFile, type Mobi, type MobiSpine, type MobiTocItem } from '@lingo-reader/mobi-parser';
 import type { TTSSettings, TTSVoice, StoredMangaDocument, ActiveMangaDocument, StoredPdfDocument, StoredImageDocument, StoredEpubDocument, StoredTxtDocument, StoredMobiDocument, FavoriteItem, Annotation, NoteFavoriteItem } from '@/types';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
@@ -132,6 +132,33 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [mobiHtmlContent, setMobiHtmlContent] = useState<string>("");
   const [mobiToc, setMobiToc] = useState<TocItem[]>([]);
   const [docxHtmlContent, setDocxHtmlContent] = useState<string>("");
+  const mobiBookRef = useRef<Mobi | null>(null);
+  const [mobiSpine, setMobiSpine] = useState<MobiSpine>([]);
+  const [mobiCurrentIndex, setMobiCurrentIndex] = useState(0);
+
+  const flattenMobiToc = useCallback((items: MobiTocItem[], level = 1): TocItem[] => {
+    const result: TocItem[] = [];
+    items.forEach((item, index) => {
+      result.push({ id: `mobi-toc-${level}-${index}`, label: item.label, level, href: item.href });
+      if (item.children?.length) {
+        result.push(...flattenMobiToc(item.children, level + 1));
+      }
+    });
+    return result;
+  }, []);
+
+  const loadMobiChapter = useCallback((chapterIndex: number) => {
+    const book = mobiBookRef.current;
+    if (!book || chapterIndex < 0 || chapterIndex >= mobiSpine.length) return false;
+    const chapter = book.loadChapter(mobiSpine[chapterIndex].id);
+    if (!chapter) return false;
+    setMobiCurrentIndex(chapterIndex);
+    setMobiHtmlContent(chapter.html);
+    const plainText = new DOMParser().parseFromString(chapter.html, 'text/html').body.textContent || "";
+    setCurrentTextForTTS(plainText);
+    if (mainHighlightedContentRef.current) mainHighlightedContentRef.current.scrollTop = 0;
+    return true;
+  }, [mobiSpine]);
   const [displayedImageSrc, setDisplayedImageSrc] = useState<string | null>(null);
   const currentImageObjectUrlRef = useRef<string | null>(null);
   
@@ -679,12 +706,26 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
 
           case 'mobi':
             try {
-                const mobiBook = await MobiParser.parseMobi(doc.fileData);
-                setMobiHtmlContent(mobiBook.content);
-                setMobiToc(mobiBook.toc); // Set the TOC
-                const plainText = new DOMParser().parseFromString(mobiBook.content, 'text/html').body.textContent || "";
-                setCurrentTextForTTS(plainText);
+                const mobiBook = await initMobiFile(new Uint8Array(doc.fileData.slice(0)));
+                if (isStale) { mobiBook.destroy(); return; }
+                if (mobiBookRef.current) mobiBookRef.current.destroy();
+                mobiBookRef.current = mobiBook;
+
+                const spine = mobiBook.getSpine();
+                setMobiSpine(spine);
+                setMobiToc(flattenMobiToc(mobiBook.getToc()));
+
+                if (spine.length > 0) {
+                    const firstChapter = mobiBook.loadChapter(spine[0].id);
+                    if (firstChapter) {
+                        setMobiCurrentIndex(0);
+                        setMobiHtmlContent(firstChapter.html);
+                        const plainText = new DOMParser().parseFromString(firstChapter.html, 'text/html').body.textContent || "";
+                        setCurrentTextForTTS(plainText);
+                    }
+                }
             } catch (mobiError: any) {
+                if (isStale) return;
                 console.error("Error parsing MOBI:", mobiError);
                 setDocErrorMessage(`Error parsing MOBI: ${mobiError.message}`);
             }
@@ -750,6 +791,8 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     setTxtContent("");
     setMobiHtmlContent("");
     setMobiToc([]);
+    setMobiSpine([]);
+    setMobiCurrentIndex(0);
     setDocxHtmlContent("");
     setDisplayedImageSrc(null);
     setIsEpubLoading(false);
@@ -769,6 +812,10 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
       if (pdfDocProxy) {
         try { pdfDocProxy.destroy(); } catch (e) { console.warn("Non-critical error destroying PDF proxy", e); }
         setPdfDocProxy(null);
+      }
+      if (mobiBookRef.current) {
+        try { mobiBookRef.current.destroy(); } catch (e) { console.warn("Non-critical error destroying MOBI book", e); }
+        mobiBookRef.current = null;
       }
       setPdfTextContent(null);
       setIsPdfTextView(false);
@@ -1047,34 +1094,19 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     isHtml?: boolean;
 }>(({ text, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, className, children, isHtml }, ref) => {
     if (isHtml) {
-        // For MOBI, render as paginated columns, not as a single scrollable block
-        if (activeDoc?.type === 'mobi') {
-             return (
-                <div
-                    ref={ref}
-                    className={cn("w-full h-full text-sm", className)}
-                    style={{
-                        columnWidth: scrollContainerRef.current ? `${scrollContainerRef.current.clientWidth}px` : '100vw',
-                        // IMPORTANT: this must stay 0. navigateMobi() and the TOC
-                        // jump handler both scroll/compute positions assuming
-                        // "one page" === exactly one column's width. Any nonzero
-                        // gap here makes the real column pitch (columnWidth + gap)
-                        // larger than what those calculations use, so the error
-                        // accumulates every page turn until two partial pages end
-                        // up visible at once.
-                        columnGap: '0px',
-                        height: '100%',
-                        overflow: 'hidden', // Hide the default vertical scrollbar
-                    }}
-                    dangerouslySetInnerHTML={{ __html: text }}
-                />
-            );
-        }
-        // Fallback for other potential HTML content
+        // MOBI is now paginated by chapter (via the mobi-parser library's
+        // spine/TOC), not by pixel-width CSS columns - so it renders as a
+        // normal scrollable block here, same as DOCX.
         return (
             <div
                 ref={ref}
-                className={cn("prose prose-sm md:prose-base max-w-none w-full h-full whitespace-pre-wrap select-text relative", className)}
+                className={cn(
+                    "max-w-none w-full h-full overflow-y-auto select-text relative leading-relaxed " +
+                    "[&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 " +
+                    "[&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_p]:mb-3 [&_p]:indent-8 [&_strong]:font-bold [&_em]:italic " +
+                    "[&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:indent-0 [&_img]:max-w-full [&_img]:h-auto",
+                    className
+                )}
                 dangerouslySetInnerHTML={{ __html: text }}
             />
         );
@@ -1428,15 +1460,8 @@ HighlightableContent.displayName = 'HighlightableContent';
   };
 
   const navigateMobi = (direction: 'prev' | 'next') => {
-    if (!mainHighlightedContentRef.current) return;
-    const container = mainHighlightedContentRef.current;
-    const scrollAmount = container.clientWidth; // Scroll by one screen width
-
-    if (direction === 'next') {
-        container.scrollBy({ left: scrollAmount, behavior: 'smooth' });
-    } else {
-        container.scrollBy({ left: -scrollAmount, behavior: 'smooth' });
-    }
+    const newIndex = direction === 'next' ? mobiCurrentIndex + 1 : mobiCurrentIndex - 1;
+    loadMobiChapter(newIndex);
   };
 
 
@@ -1799,23 +1824,24 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (activeDoc?.type === 'epub' && epubRenditionRef.current) {
         epubRenditionRef.current.display(href);
         setIsTocOpen(false);
-    } else if (activeDoc?.type === 'mobi' && mainHighlightedContentRef.current) {
-        const selector = href.startsWith('#') ? href : `#${href}`;
-        const element = mainHighlightedContentRef.current.querySelector(selector);
-        
-        if (element) {
-            const container = mainHighlightedContentRef.current;
-            const pageWidth = container.clientWidth;
-            const elementOffsetLeft = (element as HTMLElement).offsetLeft;
-            const pageIndex = Math.floor(elementOffsetLeft / pageWidth);
-            
-            container.scrollTo({
-                left: pageIndex * pageWidth,
-                behavior: 'smooth',
+    } else if (activeDoc?.type === 'mobi' && mobiBookRef.current) {
+        const resolved = mobiBookRef.current.resolveHref(href);
+        if (!resolved) {
+            console.warn(`Could not resolve MOBI TOC href "${href}".`);
+            return;
+        }
+        const chapterIndex = mobiSpine.findIndex((ch) => ch.id === resolved.id);
+        if (chapterIndex < 0) return;
+
+        const loaded = loadMobiChapter(chapterIndex);
+        setIsTocOpen(false);
+        if (loaded && resolved.selector) {
+            // Wait for the new chapter's HTML to actually be in the DOM before
+            // trying to scroll to the specific element within it.
+            requestAnimationFrame(() => {
+                const el = mainHighlightedContentRef.current?.querySelector(resolved.selector);
+                el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             });
-            setIsTocOpen(false);
-        } else {
-            console.warn(`TOC item with selector "${selector}" not found in MOBI content.`);
         }
     }
   };
@@ -1929,7 +1955,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                 isSpeaking={isSpeaking}
                 isPaused={isPaused}
                 isHtml={true}
-                className="p-4 md:p-6 max-w-none leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_h4]:text-base [&_h4]:font-bold [&_h4]:mt-3 [&_h4]:mb-1 [&_h5]:text-base [&_h5]:font-semibold [&_h6]:text-sm [&_h6]:font-semibold [&_p]:mb-3 [&_strong]:font-bold [&_em]:italic [&_u]:underline [&_a]:text-primary [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 [&_blockquote]:border-l-4 [&_blockquote]:border-muted-foreground/30 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:my-3 [&_table]:border-collapse [&_table]:mb-3 [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_th]:bg-muted [&_th]:font-semibold [&_img]:max-w-full [&_img]:h-auto [&_img]:my-3 [&_hr]:my-4"
+                className="p-4 md:p-6 max-w-none leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_h4]:text-base [&_h4]:font-bold [&_h4]:mt-3 [&_h4]:mb-1 [&_h5]:text-base [&_h5]:font-semibold [&_h6]:text-sm [&_h6]:font-semibold [&_p]:mb-3 [&_p]:indent-8 [&_strong]:font-bold [&_em]:italic [&_u]:underline [&_a]:text-primary [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 [&_li]:indent-0 [&_blockquote]:border-l-4 [&_blockquote]:border-muted-foreground/30 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:my-3 [&_table]:border-collapse [&_table]:mb-3 [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_th]:bg-muted [&_th]:font-semibold [&_img]:max-w-full [&_img]:h-auto [&_img]:my-3 [&_hr]:my-4"
               >
                 <AnnotationMarkers containerRef={mainHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
             </HighlightableContent>
@@ -2245,14 +2271,14 @@ HighlightableContent.displayName = 'HighlightableContent';
                                 <>
                                 <Separator/>
                                 <div className="flex items-center justify-between">
-                                    <Button onClick={() => activeDoc?.type === 'pdf' ? navigatePdf('prev') : navigateMobi('prev')} disabled={isLoadingDoc || isRenderingPdfPage || (activeDoc?.type === 'pdf' && currentPdfPageNum <= 1)} size="icon" variant="outline" aria-label="Previous Page"><ChevronLeft className="h-4 w-4"/></Button>
+                                    <Button onClick={() => activeDoc?.type === 'pdf' ? navigatePdf('prev') : navigateMobi('prev')} disabled={isLoadingDoc || isRenderingPdfPage || (activeDoc?.type === 'pdf' ? currentPdfPageNum <= 1 : mobiCurrentIndex <= 0)} size="icon" variant="outline" aria-label="Previous Page"><ChevronLeft className="h-4 w-4"/></Button>
                                     {activeDoc?.type === 'pdf' && pdfTotalPages > 0 && 
                                         <Button variant="ghost" className="h-9 tabular-nums bg-yellow-200 hover:bg-yellow-300" onClick={() => openJumpDialog('pdf', currentPdfPageNum, pdfTotalPages)}>
                                             {currentPdfPageNum} / {pdfTotalPages}
                                         </Button>
                                     }
-                                    {activeDoc?.type === 'mobi' && <span className="text-sm text-muted-foreground">Page Navigation</span>}
-                                    <Button onClick={() => activeDoc?.type === 'pdf' ? navigatePdf('next') : navigateMobi('next')} disabled={isLoadingDoc || isRenderingPdfPage || (activeDoc?.type === 'pdf' && currentPdfPageNum >= pdfTotalPages)} size="icon" variant="outline" aria-label="Next Page"><ChevronRight className="h-4 w-4"/></Button>
+                                    {activeDoc?.type === 'mobi' && mobiSpine.length > 0 && <span className="text-sm text-muted-foreground tabular-nums">{mobiCurrentIndex + 1} / {mobiSpine.length}</span>}
+                                    <Button onClick={() => activeDoc?.type === 'pdf' ? navigatePdf('next') : navigateMobi('next')} disabled={isLoadingDoc || isRenderingPdfPage || (activeDoc?.type === 'pdf' ? currentPdfPageNum >= pdfTotalPages : mobiCurrentIndex >= mobiSpine.length - 1)} size="icon" variant="outline" aria-label="Next Page"><ChevronRight className="h-4 w-4"/></Button>
                                 </div>
                                 </>
                             )}

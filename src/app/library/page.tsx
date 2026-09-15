@@ -2,17 +2,20 @@
 "use client";
 
 import { useState, useEffect, useRef, useContext } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book } from 'lucide-react';
+import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
+import { searchExternalLiterature, fetchExternalDocument, type ExternalSearchResult } from '@/lib/externalLiteratureService';
+import { setEphemeralDocument } from '@/lib/ephemeralDocumentStore';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -45,6 +48,7 @@ function truncateTitle(title: string, maxWords: number = 4): string {
 
 function LibraryPageContent() {
   const { toast } = useToast();
+  const router = useRouter();
   // Initialize with empty/loading state to match server render and prevent hydration errors
   const [storedDocuments, setStoredDocuments] = useState<StoredMangaDocument[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,6 +56,14 @@ function LibraryPageContent() {
   const [isSavingToDevice, setIsSavingToDevice] = useState<string | null>(null);
   const [docToDelete, setDocToDelete] = useState<StoredMangaDocument | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // External literature search (arXiv / Project Gutenberg) - results are
+  // never stored on our own R2/D1, only fetched on demand when opened.
+  const [externalQuery, setExternalQuery] = useState('');
+  const [externalResults, setExternalResults] = useState<ExternalSearchResult[]>([]);
+  const [isSearchingExternal, setIsSearchingExternal] = useState(false);
+  const [openingExternalId, setOpeningExternalId] = useState<string | null>(null);
+  const [externalSearchError, setExternalSearchError] = useState('');
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -97,6 +109,38 @@ function LibraryPageContent() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array ensures this runs only once on mount
+
+  const handleExternalSearch = async () => {
+    const query = externalQuery.trim();
+    if (!query) return;
+    setExternalSearchError('');
+    setIsSearchingExternal(true);
+    const result = await searchExternalLiterature(query);
+    setIsSearchingExternal(false);
+
+    if (result.success) {
+      setExternalResults(result.results);
+      if (result.results.length === 0) {
+        setExternalSearchError('没有找到相关结果，换个关键词试试。');
+      }
+    } else {
+      setExternalResults([]);
+      setExternalSearchError(result.message || '搜索失败。');
+    }
+  };
+
+  const handleOpenExternalResult = async (result: ExternalSearchResult) => {
+    setOpeningExternalId(result.id);
+    try {
+      const doc = await fetchExternalDocument(result);
+      setEphemeralDocument(doc);
+      router.push(`/reader?docId=${doc.id}`);
+    } catch (e: any) {
+      toast({ variant: 'destructive', title: '打开失败', description: e?.message || '获取文献内容失败。' });
+    } finally {
+      setOpeningExternalId(null);
+    }
+  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -245,6 +289,57 @@ function LibraryPageContent() {
               />
             </div>
             {isUploading && <p className="mt-2 text-sm text-muted-foreground flex items-center"><Loader2 className="mr-2 h-4 w-4 animate-spin" />{libraryDict.processingAndSaving}</p>}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
+            <CardDescription>
+              搜索 arXiv（学术论文预印本）和 Project Gutenberg（公共领域电子书），点击"阅读"直接在线浏览，不会占用你的存储空间。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2 max-w-md">
+              <Input
+                placeholder="输入关键词，如书名、论文主题、作者"
+                value={externalQuery}
+                onChange={(e) => setExternalQuery(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleExternalSearch()}
+                disabled={isSearchingExternal}
+              />
+              <Button onClick={handleExternalSearch} disabled={isSearchingExternal || !externalQuery.trim()}>
+                {isSearchingExternal ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+              </Button>
+            </div>
+            {externalSearchError && <p className="mt-2 text-sm text-muted-foreground">{externalSearchError}</p>}
+            {externalResults.length > 0 && (
+              <ul className="mt-4 space-y-2">
+                {externalResults.map((result) => (
+                  <li key={result.id} className="flex items-center justify-between gap-3 p-3 border rounded-md">
+                    <div className="min-w-0">
+                      <p className="font-medium truncate">{result.title}</p>
+                      <p className="text-sm text-muted-foreground truncate">
+                        {result.authors}{result.year ? ` · ${result.year}` : ''} · {result.source === 'arxiv' ? 'arXiv' : 'Project Gutenberg'} · {result.format.toUpperCase()}
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="flex-shrink-0"
+                      onClick={() => handleOpenExternalResult(result)}
+                      disabled={openingExternalId === result.id}
+                    >
+                      {openingExternalId === result.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <>阅读 <ExternalLink className="ml-1 h-3 w-3" /></>
+                      )}
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
 

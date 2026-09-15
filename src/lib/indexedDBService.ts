@@ -13,6 +13,7 @@
 import type { StoredMangaDocument, StoredPdfDocument, MangaDocumentDisplayInfo, MediaFavoriteItem } from '@/types';
 import { saveDocumentMetadata } from './localStorageService';
 import { getCachedUser } from './authService';
+import { isEphemeralDocId, setEphemeralDocument, getEphemeralDocument } from './ephemeralDocumentStore';
 
 const DB_VERSION = 1;
 const LAST_ACTIVE_DOC_STORE_NAME = 'appState';
@@ -83,6 +84,14 @@ export function logoutAndClearPromises() {
 // --- Document Functions (R2 + D1 backed via /api/documents) ---
 
 export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
+  // Documents opened from "search external literature" are never uploaded to
+  // our own storage - editing their in-memory annotations/OCR text just
+  // updates the ephemeral copy for this browser tab.
+  if (isEphemeralDocId(doc.id)) {
+    setEphemeralDocument(doc);
+    return;
+  }
+
   documentCache = null; // Invalidate cache
 
   const { fileData, ...metadata } = doc as StoredMangaDocument & { fileData: ArrayBuffer };
@@ -98,6 +107,10 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
 }
 
 export async function getDocumentById(id: string): Promise<StoredMangaDocument | undefined> {
+  if (isEphemeralDocId(id)) {
+    return getEphemeralDocument(id);
+  }
+
   const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { credentials: 'include' });
   if (res.status === 404) return undefined;
   const data = (await res.json().catch(() => ({}))) as any;

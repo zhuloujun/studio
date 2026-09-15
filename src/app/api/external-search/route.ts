@@ -5,7 +5,7 @@ import { signUrl } from '@/lib/urlSigning';
 
 export interface ExternalSearchResult {
   id: string;
-  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc';
+  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc' | 'hcommons' | 'archive';
   title: string;
   authors: string;
   year?: string;
@@ -299,6 +299,95 @@ async function searchPmc(query: string): Promise<RawResult[]> {
   return results;
 }
 
+async function searchHCommons(query: string): Promise<RawResult[]> {
+  // works.hcommons.org (KCWorks) runs on InvenioRDM - the same open-source
+  // platform behind Zenodo - so the API shape is essentially identical.
+  const url = `https://works.hcommons.org/api/records?q=${encodeURIComponent(query)}&size=6`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    hits?: {
+      hits?: {
+        id: string;
+        metadata: { title: string; creators?: { person_or_org?: { name?: string } }[]; publication_date?: string };
+        files?: { entries?: Record<string, { key: string; links: { content: string } }> };
+      }[];
+    };
+  };
+
+  const results: RawResult[] = [];
+  for (const record of data.hits?.hits || []) {
+    const entries = Object.values(record.files?.entries || {});
+    const file = entries.find((f) => /\.(pdf|epub|txt)$/i.test(f.key));
+    if (!file) continue;
+    const ext = file.key.split('.').pop()?.toLowerCase();
+    const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+
+    results.push({
+      id: `hcommons-${record.id}`,
+      source: 'hcommons',
+      title: record.metadata.title,
+      authors: (record.metadata.creators || []).map((c) => c.person_or_org?.name).filter(Boolean).join(', ') || '未知作者',
+      year: record.metadata.publication_date?.slice(0, 4),
+      format,
+      rawUrl: file.links.content,
+    });
+  }
+  return results;
+}
+
+async function searchInternetArchive(query: string): Promise<RawResult[]> {
+  const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
+    query
+  )}+AND+mediatype:texts&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=6&output=json`;
+  const searchRes = await fetch(searchUrl);
+  if (!searchRes.ok) return [];
+  const searchData = (await searchRes.json()) as {
+    response?: { docs?: { identifier: string; title: string; creator?: string | string[]; year?: string }[] };
+  };
+  const docs = searchData.response?.docs || [];
+  if (docs.length === 0) return [];
+
+  // Each item's actual downloadable files (and their exact names) vary, so
+  // check each item's file manifest rather than guessing a URL pattern.
+  const withFiles = await Promise.all(
+    docs.map(async (doc) => {
+      try {
+        const metaRes = await fetch(`https://archive.org/metadata/${doc.identifier}`);
+        if (!metaRes.ok) return null;
+        const meta = (await metaRes.json()) as { files?: { name: string; format?: string }[] };
+        const files = meta.files || [];
+        const pick =
+          files.find((f) => f.format === 'EPUB') ||
+          files.find((f) => /\.pdf$/i.test(f.name)) ||
+          files.find((f) => f.format === 'DjVuTXT' || /\.txt$/i.test(f.name));
+        if (!pick) return null;
+        const ext = pick.name.split('.').pop()?.toLowerCase();
+        const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+        return { doc, url: `https://archive.org/download/${doc.identifier}/${pick.name}`, format };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const results: RawResult[] = [];
+  for (const item of withFiles) {
+    if (!item) continue;
+    const authors = Array.isArray(item.doc.creator) ? item.doc.creator.join(', ') : item.doc.creator;
+    results.push({
+      id: `archive-${item.doc.identifier}`,
+      source: 'archive',
+      title: item.doc.title,
+      authors: authors || '未知作者',
+      year: item.doc.year,
+      format: item.format,
+      rawUrl: item.url,
+    });
+  }
+  return results;
+}
+
 export async function GET(req: NextRequest) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
   const session = await getSession(sessionId);
@@ -322,6 +411,8 @@ export async function GET(req: NextRequest) {
       crossrefResults,
       zenodoResults,
       pmcResults,
+      hcommonsResults,
+      archiveResults,
     ] = await Promise.all([
       searchArxiv(query).catch((e) => {
         console.error('[external-search] arxiv failed', e);
@@ -355,6 +446,14 @@ export async function GET(req: NextRequest) {
         console.error('[external-search] pmc failed', e);
         return [];
       }),
+      searchHCommons(query).catch((e) => {
+        console.error('[external-search] hcommons failed', e);
+        return [];
+      }),
+      searchInternetArchive(query).catch((e) => {
+        console.error('[external-search] internet archive failed', e);
+        return [];
+      }),
     ]);
 
     const rawResults = [
@@ -366,6 +465,8 @@ export async function GET(req: NextRequest) {
       ...crossrefResults,
       ...zenodoResults,
       ...pmcResults,
+      ...hcommonsResults,
+      ...archiveResults,
     ];
     const results: ExternalSearchResult[] = await Promise.all(
       rawResults.map(async ({ rawUrl, ...rest }) => ({ ...rest, fileUrl: await signUrl(rawUrl) }))

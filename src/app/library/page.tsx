@@ -56,6 +56,8 @@ function externalSourceLabel(source: ExternalSearchResult['source']): string {
     case 'crossref': return 'Crossref';
     case 'zenodo': return 'Zenodo';
     case 'pmc': return 'PubMed Central';
+    case 'hcommons': return 'Knowledge Commons Works';
+    case 'archive': return 'Internet Archive';
     default: return source;
   }
 }

@@ -25,12 +25,16 @@ const FORMAT_TO_MIME: Record<ExternalSearchResult['format'], string> = {
   pdf: 'application/pdf',
   epub: 'application/epub+zip',
   txt: 'text/plain',
+  mobi: 'application/x-mobipocket-ebook',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 
 const FORMAT_TO_DOC_TYPE: Record<ExternalSearchResult['format'], StoredMangaDocument['type']> = {
   pdf: 'pdf',
   epub: 'epub',
   txt: 'txt',
+  mobi: 'mobi',
+  docx: 'docx',
 };
 
 /** Fetches the actual file through our proxy and builds an in-memory document ready for the reader - never saved to our storage. */

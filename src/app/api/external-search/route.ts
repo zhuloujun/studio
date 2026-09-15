@@ -3,13 +3,31 @@ import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { getEnv } from '@/lib/cloudflare';
 import { signUrl } from '@/lib/urlSigning';
 
+// Every source below hits a different third-party API with its own latency
+// characteristics; a single slow/hanging one (this has happened with PMC and
+// Internet Archive, which each chain several sequential requests) used to
+// drag out - or occasionally blow the resource limits on - the whole search.
+// Every fetch in this file goes through this wrapper so one bad source can
+// only ever cost its own timeout, never the whole request.
+const SOURCE_TIMEOUT_MS = 6000;
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SOURCE_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface ExternalSearchResult {
   id: string;
   source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc' | 'hcommons' | 'archive';
   title: string;
   authors: string;
   year?: string;
-  format: 'pdf' | 'epub' | 'txt';
+  format: 'pdf' | 'epub' | 'txt' | 'mobi' | 'docx';
   // A short-lived signed token that /api/external-search/proxy will accept -
   // NOT the raw URL. Open-access papers/books are hosted on all kinds of
   // domains (publishers, institutional repositories, etc.), so instead of a
@@ -29,7 +47,7 @@ interface RawResult {
 
 async function searchArxiv(query: string): Promise<RawResult[]> {
   const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const xml = await res.text();
 
@@ -63,7 +81,7 @@ async function searchArxiv(query: string): Promise<RawResult[]> {
 
 async function searchGutenberg(query: string): Promise<RawResult[]> {
   const url = `https://gutendex.com/books?search=${encodeURIComponent(query)}`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     results: { id: number; title: string; authors: { name: string }[]; formats: Record<string, string> }[];
@@ -72,8 +90,9 @@ async function searchGutenberg(query: string): Promise<RawResult[]> {
   const results: RawResult[] = [];
   for (const book of data.results || []) {
     const epubUrl = Object.entries(book.formats).find(([k]) => k.includes('epub'))?.[1];
+    const mobiUrl = Object.entries(book.formats).find(([k]) => k.includes('mobipocket'))?.[1];
     const txtUrl = Object.entries(book.formats).find(([k]) => k.startsWith('text/plain'))?.[1];
-    const rawUrl = epubUrl || txtUrl;
+    const rawUrl = epubUrl || mobiUrl || txtUrl;
     if (!rawUrl) continue;
 
     results.push({
@@ -81,7 +100,7 @@ async function searchGutenberg(query: string): Promise<RawResult[]> {
       source: 'gutenberg',
       title: book.title,
       authors: book.authors.map((a) => a.name).join(', ') || '未知作者',
-      format: epubUrl ? 'epub' : 'txt',
+      format: epubUrl ? 'epub' : mobiUrl ? 'mobi' : 'txt',
       rawUrl,
     });
   }
@@ -92,7 +111,7 @@ async function searchSemanticScholar(query: string): Promise<RawResult[]> {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
     query
   )}&fields=title,authors,year,openAccessPdf&limit=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     data?: { paperId: string; title: string; year?: number; authors?: { name: string }[]; openAccessPdf?: { url: string } | null }[];
@@ -121,7 +140,7 @@ async function searchCore(query: string, apiKey: string | undefined): Promise<Ra
   if (!apiKey) return []; // Silently skipped when no key is configured.
 
   const url = `https://api.core.ac.uk/v3/search/works/?q=${encodeURIComponent(query)}&limit=6`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+  const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${apiKey}` } });
   if (!res.ok) return [];
   const data = (await res.json()) as {
     results?: { id: number; title: string; authors?: { name: string }[]; yearPublished?: number; downloadUrl?: string }[];
@@ -145,7 +164,7 @@ async function searchCore(query: string, apiKey: string | undefined): Promise<Ra
 
 async function searchOpenAlex(query: string): Promise<RawResult[]> {
   const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     results?: {
@@ -177,7 +196,7 @@ async function searchOpenAlex(query: string): Promise<RawResult[]> {
 
 async function searchCrossref(query: string): Promise<RawResult[]> {
   const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     message?: {
@@ -213,7 +232,7 @@ async function searchCrossref(query: string): Promise<RawResult[]> {
 
 async function searchZenodo(query: string): Promise<RawResult[]> {
   const url = `https://zenodo.org/api/records/?q=${encodeURIComponent(query)}&size=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     hits?: {
@@ -227,10 +246,11 @@ async function searchZenodo(query: string): Promise<RawResult[]> {
 
   const results: RawResult[] = [];
   for (const record of data.hits?.hits || []) {
-    const file = (record.files || []).find((f) => /\.(pdf|epub|txt)$/i.test(f.key));
+    const file = (record.files || []).find((f) => /\.(pdf|epub|txt|mobi|docx)$/i.test(f.key));
     if (!file) continue;
     const ext = file.key.split('.').pop()?.toLowerCase();
-    const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+    const format: RawResult['format'] =
+      ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : ext === 'docx' ? 'docx' : 'pdf';
 
     results.push({
       id: `zenodo-${record.id}`,
@@ -249,8 +269,8 @@ async function searchPmc(query: string): Promise<RawResult[]> {
   // Step 1: find matching PMC IDs.
   const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term=${encodeURIComponent(
     query
-  )}&retmax=6&retmode=json`;
-  const searchRes = await fetch(searchUrl);
+  )}&retmax=4&retmode=json`;
+  const searchRes = await fetchWithTimeout(searchUrl);
   if (!searchRes.ok) return [];
   const searchData = (await searchRes.json()) as { esearchresult?: { idlist?: string[] } };
   const uids = searchData.esearchresult?.idlist || [];
@@ -258,7 +278,7 @@ async function searchPmc(query: string): Promise<RawResult[]> {
 
   // Step 2: batch-fetch titles/authors/year for all of them at once.
   const summaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pmc&id=${uids.join(',')}&retmode=json`;
-  const summaryRes = await fetch(summaryUrl);
+  const summaryRes = await fetchWithTimeout(summaryUrl);
   const summaryData = summaryRes.ok
     ? ((await summaryRes.json()) as { result?: Record<string, { title?: string; authors?: { name: string }[]; pubdate?: string }> })
     : { result: {} };
@@ -269,7 +289,7 @@ async function searchPmc(query: string): Promise<RawResult[]> {
     uids.map(async (uid) => {
       const pmcId = `PMC${uid}`;
       try {
-        const oaRes = await fetch(`https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=${pmcId}`);
+        const oaRes = await fetchWithTimeout(`https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=${pmcId}`);
         if (!oaRes.ok) return null;
         const xml = await oaRes.text();
         const pdfMatch = /<link format="pdf"[^>]*href="(.*?)"/.exec(xml);
@@ -303,7 +323,7 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
   // works.hcommons.org (KCWorks) runs on InvenioRDM - the same open-source
   // platform behind Zenodo - so the API shape is essentially identical.
   const url = `https://works.hcommons.org/api/records?q=${encodeURIComponent(query)}&size=6`;
-  const res = await fetch(url);
+  const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     hits?: {
@@ -318,10 +338,11 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
   const results: RawResult[] = [];
   for (const record of data.hits?.hits || []) {
     const entries = Object.values(record.files?.entries || {});
-    const file = entries.find((f) => /\.(pdf|epub|txt)$/i.test(f.key));
+    const file = entries.find((f) => /\.(pdf|epub|txt|mobi|docx)$/i.test(f.key));
     if (!file) continue;
     const ext = file.key.split('.').pop()?.toLowerCase();
-    const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+    const format: RawResult['format'] =
+      ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : ext === 'docx' ? 'docx' : 'pdf';
 
     results.push({
       id: `hcommons-${record.id}`,
@@ -339,8 +360,8 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
 async function searchInternetArchive(query: string): Promise<RawResult[]> {
   const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
     query
-  )}+AND+mediatype:texts&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=6&output=json`;
-  const searchRes = await fetch(searchUrl);
+  )}+AND+mediatype:texts&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=year&rows=4&output=json`;
+  const searchRes = await fetchWithTimeout(searchUrl);
   if (!searchRes.ok) return [];
   const searchData = (await searchRes.json()) as {
     response?: { docs?: { identifier: string; title: string; creator?: string | string[]; year?: string }[] };
@@ -353,17 +374,19 @@ async function searchInternetArchive(query: string): Promise<RawResult[]> {
   const withFiles = await Promise.all(
     docs.map(async (doc) => {
       try {
-        const metaRes = await fetch(`https://archive.org/metadata/${doc.identifier}`);
+        const metaRes = await fetchWithTimeout(`https://archive.org/metadata/${doc.identifier}`);
         if (!metaRes.ok) return null;
         const meta = (await metaRes.json()) as { files?: { name: string; format?: string }[] };
         const files = meta.files || [];
         const pick =
           files.find((f) => f.format === 'EPUB') ||
+          files.find((f) => f.format === 'MOBI' || /\.mobi$/i.test(f.name)) ||
           files.find((f) => /\.pdf$/i.test(f.name)) ||
           files.find((f) => f.format === 'DjVuTXT' || /\.txt$/i.test(f.name));
         if (!pick) return null;
         const ext = pick.name.split('.').pop()?.toLowerCase();
-        const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+        const format: RawResult['format'] =
+          ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : 'pdf';
         return { doc, url: `https://archive.org/download/${doc.identifier}/${pick.name}`, format };
       } catch {
         return null;

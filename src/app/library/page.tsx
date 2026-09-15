@@ -123,6 +123,14 @@ function LibraryPageContent() {
         import.meta.url
       ).toString();
     }
+    // Restore the last external literature search so refreshing the page
+    // (or navigating away and back) doesn't lose it.
+    const cachedSearch = LocalStorageService.loadExternalSearchCache<ExternalSearchResult>();
+    if (cachedSearch) {
+      setExternalQuery(cachedSearch.query);
+      setExternalResults(cachedSearch.results);
+    }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array ensures this runs only once on mount
 
@@ -136,6 +144,7 @@ function LibraryPageContent() {
 
     if (result.success) {
       setExternalResults(result.results);
+      LocalStorageService.saveExternalSearchCache(query, result.results);
       if (result.results.length === 0) {
         setExternalSearchError('没有找到相关结果，换个关键词试试。');
       }
@@ -150,9 +159,16 @@ function LibraryPageContent() {
     try {
       const doc = await fetchExternalDocument(result);
       setEphemeralDocument(doc);
-      router.push(`/reader?docId=${doc.id}`);
+      router.push(`/reader?docId=${encodeURIComponent(doc.id)}`);
     } catch (e: any) {
-      toast({ variant: 'destructive', title: '打开失败', description: e?.message || '获取文献内容失败。' });
+      const isExpired = typeof e?.message === 'string' && e.message.includes('403');
+      toast({
+        variant: 'destructive',
+        title: '打开失败',
+        description: isExpired
+          ? '这条搜索结果的链接已过期，请重新搜索一次再打开。'
+          : e?.message || '获取文献内容失败。',
+      });
     } finally {
       setOpeningExternalId(null);
     }

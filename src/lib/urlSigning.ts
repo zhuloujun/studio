@@ -9,7 +9,7 @@
 import { getSetting, setSetting } from './adminSettings';
 
 const SIGNING_SECRET_KEY = 'external_url_signing_secret';
-const TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes - plenty to click "read" after searching
+const TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours - generous enough that a cached search result (see localStorage caching in the library page) is still openable well after the search, without making an SSRF-relay abuse window unreasonably long.
 
 async function getSigningSecret(): Promise<string> {
   let secret = await getSetting(SIGNING_SECRET_KEY);

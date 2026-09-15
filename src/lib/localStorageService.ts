@@ -34,6 +34,7 @@ const FAVORITES_PLAYBACK_MODE_KEY = 'mangaTalk_favoritesPlaybackMode_v1';
 const NOTES_PLAYBACK_MODE_KEY = 'mangaTalk_notesPlaybackMode_v1';
 const MEDIA_PLAYBACK_MODE_KEY = 'mangaTalk_mediaPlaybackMode_v1';
 const READING_AREA_BG_KEY = 'mangaTalk_readingAreaBg_v2'; // Changed to v2 for new data type
+const EXTERNAL_SEARCH_CACHE_KEY = 'mangaTalk_externalSearchCache_v1';
 
 
 const ALL_USER_SPECIFIC_BASE_KEYS = [
@@ -53,6 +54,7 @@ const ALL_USER_SPECIFIC_BASE_KEYS = [
     NOTES_PLAYBACK_MODE_KEY,
     MEDIA_PLAYBACK_MODE_KEY,
     READING_AREA_BG_KEY,
+    EXTERNAL_SEARCH_CACHE_KEY,
 ];
 
 
@@ -354,4 +356,26 @@ export const saveMediaPlaybackMode = (mode: PlaybackMode): boolean => {
     const key = getUserKey(MEDIA_PLAYBACK_MODE_KEY);
     if (!key) return false;
     return safeLocalStorageSet(key, mode);
+};
+
+// --- External literature search cache ---
+// Keeps the last search's query + results around so refreshing the library
+// page (or navigating away and back) doesn't lose them. This is scoped to
+// this browser only, same as everything else in this file.
+interface ExternalSearchCache<T> {
+    query: string;
+    results: T[];
+    savedAt: number;
+}
+
+export const loadExternalSearchCache = <T,>(): ExternalSearchCache<T> | null => {
+    const key = getUserKey(EXTERNAL_SEARCH_CACHE_KEY);
+    if (!key) return null;
+    return safeLocalStorageGet<ExternalSearchCache<T> | null>(key, null);
+};
+
+export const saveExternalSearchCache = <T,>(query: string, results: T[]): boolean => {
+    const key = getUserKey(EXTERNAL_SEARCH_CACHE_KEY);
+    if (!key) return false;
+    return safeLocalStorageSet(key, { query, results, savedAt: Date.now() });
 };

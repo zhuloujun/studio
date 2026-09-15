@@ -17,6 +17,22 @@ export function getEphemeralDocument(id: string): StoredMangaDocument | undefine
   return store.get(id);
 }
 
+// Prefixes used by every external literature source in
+// /api/external-search - kept as a single list here so it can't drift out
+// of sync with the id-generation code in that route.
+const EXTERNAL_SOURCE_PREFIXES = [
+  'arxiv-',
+  'gutenberg-',
+  'semanticscholar-',
+  'core-',
+  'openalex-',
+  'crossref-',
+  'zenodo-',
+  'pmc-',
+  'hcommons-',
+  'archive-',
+];
+
 export function isEphemeralDocId(id: string): boolean {
-  return id.startsWith('external-');
+  return EXTERNAL_SOURCE_PREFIXES.some((prefix) => id.startsWith(prefix));
 }

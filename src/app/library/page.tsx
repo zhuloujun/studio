@@ -158,7 +158,15 @@ function LibraryPageContent() {
     setOpeningExternalId(result.id);
     try {
       const doc = await fetchExternalDocument(result);
-      setEphemeralDocument(doc);
+      const stored = setEphemeralDocument(doc);
+      if (!stored) {
+        toast({
+          variant: 'destructive',
+          title: '打开失败',
+          description: '这份文献文件太大，暂时无法在阅读器中打开。',
+        });
+        return;
+      }
       router.push(`/reader?docId=${encodeURIComponent(doc.id)}`);
     } catch (e: any) {
       const isExpired = typeof e?.message === 'string' && e.message.includes('403');
@@ -328,7 +336,7 @@ function LibraryPageContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
             <CardDescription>
-              搜索 arXiv、OpenAlex、Semantic Scholar、Crossref、Zenodo、PubMed Central 等开放学术数据库和 Project Gutenberg 公共领域电子书，点击"阅读"直接在线浏览，不会占用你的存储空间。
+              目前先接入 Semantic Scholar（学术论文）验证效果，确认稳定后会逐步加回其他数据源。点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>
           </CardHeader>
           <CardContent>

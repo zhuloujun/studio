@@ -423,74 +423,37 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ success: false, message: '请输入搜索关键词。' }, { status: 400 });
   }
 
+  // Temporarily scoped down to a single, easy-to-verify source while we
+  // confirm the whole search -> read pipeline is solid end to end. Add
+  // entries back to this list to re-enable them - each function is still
+  // fully implemented below, just not called for now.
+  const ENABLED_SOURCES: ExternalSearchResult['source'][] = ['semanticscholar'];
+
   try {
     const env = getEnv();
-    const [
-      arxivResults,
-      gutenbergResults,
-      semanticScholarResults,
-      coreResults,
-      openAlexResults,
-      crossrefResults,
-      zenodoResults,
-      pmcResults,
-      hcommonsResults,
-      archiveResults,
-    ] = await Promise.all([
-      searchArxiv(query).catch((e) => {
-        console.error('[external-search] arxiv failed', e);
-        return [];
-      }),
-      searchGutenberg(query).catch((e) => {
-        console.error('[external-search] gutenberg failed', e);
-        return [];
-      }),
-      searchSemanticScholar(query).catch((e) => {
-        console.error('[external-search] semantic scholar failed', e);
-        return [];
-      }),
-      searchCore(query, env.CORE_API_KEY).catch((e) => {
-        console.error('[external-search] core failed', e);
-        return [];
-      }),
-      searchOpenAlex(query).catch((e) => {
-        console.error('[external-search] openalex failed', e);
-        return [];
-      }),
-      searchCrossref(query).catch((e) => {
-        console.error('[external-search] crossref failed', e);
-        return [];
-      }),
-      searchZenodo(query).catch((e) => {
-        console.error('[external-search] zenodo failed', e);
-        return [];
-      }),
-      searchPmc(query).catch((e) => {
-        console.error('[external-search] pmc failed', e);
-        return [];
-      }),
-      searchHCommons(query).catch((e) => {
-        console.error('[external-search] hcommons failed', e);
-        return [];
-      }),
-      searchInternetArchive(query).catch((e) => {
-        console.error('[external-search] internet archive failed', e);
-        return [];
-      }),
-    ]);
+    const sourceRunners: Record<ExternalSearchResult['source'], () => Promise<RawResult[]>> = {
+      arxiv: () => searchArxiv(query),
+      gutenberg: () => searchGutenberg(query),
+      semanticscholar: () => searchSemanticScholar(query),
+      core: () => searchCore(query, env.CORE_API_KEY),
+      openalex: () => searchOpenAlex(query),
+      crossref: () => searchCrossref(query),
+      zenodo: () => searchZenodo(query),
+      pmc: () => searchPmc(query),
+      hcommons: () => searchHCommons(query),
+      archive: () => searchInternetArchive(query),
+    };
 
-    const rawResults = [
-      ...arxivResults,
-      ...gutenbergResults,
-      ...semanticScholarResults,
-      ...coreResults,
-      ...openAlexResults,
-      ...crossrefResults,
-      ...zenodoResults,
-      ...pmcResults,
-      ...hcommonsResults,
-      ...archiveResults,
-    ];
+    const rawResultLists = await Promise.all(
+      ENABLED_SOURCES.map((source) =>
+        sourceRunners[source]().catch((e) => {
+          console.error(`[external-search] ${source} failed`, e);
+          return [] as RawResult[];
+        })
+      )
+    );
+
+    const rawResults = rawResultLists.flat();
     const results: ExternalSearchResult[] = await Promise.all(
       rawResults.map(async ({ rawUrl, ...rest }) => ({ ...rest, fileUrl: await signUrl(rawUrl) }))
     );

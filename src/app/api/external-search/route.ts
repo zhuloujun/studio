@@ -5,7 +5,7 @@ import { signUrl } from '@/lib/urlSigning';
 
 export interface ExternalSearchResult {
   id: string;
-  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core';
+  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc';
   title: string;
   authors: string;
   year?: string;
@@ -143,6 +143,162 @@ async function searchCore(query: string, apiKey: string | undefined): Promise<Ra
   return results;
 }
 
+async function searchOpenAlex(query: string): Promise<RawResult[]> {
+  const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=6`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    results?: {
+      id: string;
+      title: string;
+      publication_year?: number;
+      authorships?: { author?: { display_name?: string } }[];
+      open_access?: { is_oa: boolean; oa_url?: string | null };
+    }[];
+  };
+
+  const results: RawResult[] = [];
+  for (const work of data.results || []) {
+    if (!work.open_access?.is_oa || !work.open_access.oa_url) continue;
+    const workId = work.id.split('/').pop() || work.id;
+
+    results.push({
+      id: `openalex-${workId}`,
+      source: 'openalex',
+      title: work.title,
+      authors: (work.authorships || []).map((a) => a.author?.display_name).filter(Boolean).join(', ') || '未知作者',
+      year: work.publication_year ? String(work.publication_year) : undefined,
+      format: 'pdf',
+      rawUrl: work.open_access.oa_url,
+    });
+  }
+  return results;
+}
+
+async function searchCrossref(query: string): Promise<RawResult[]> {
+  const url = `https://api.crossref.org/works?query=${encodeURIComponent(query)}&rows=6`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    message?: {
+      items?: {
+        DOI: string;
+        title?: string[];
+        author?: { given?: string; family?: string }[];
+        published?: { 'date-parts'?: number[][] };
+        link?: { URL: string; 'content-type'?: string }[];
+      }[];
+    };
+  };
+
+  const results: RawResult[] = [];
+  for (const item of data.message?.items || []) {
+    // Crossref is primarily a DOI/metadata registry - only some records
+    // (mostly fully open-access journals) also list a direct full-text link.
+    const pdfLink = item.link?.find((l) => l['content-type']?.includes('pdf'));
+    if (!pdfLink || !item.title?.[0]) continue;
+
+    results.push({
+      id: `crossref-${item.DOI}`,
+      source: 'crossref',
+      title: item.title[0],
+      authors: (item.author || []).map((a) => [a.given, a.family].filter(Boolean).join(' ')).join(', ') || '未知作者',
+      year: item.published?.['date-parts']?.[0]?.[0] ? String(item.published['date-parts'][0][0]) : undefined,
+      format: 'pdf',
+      rawUrl: pdfLink.URL,
+    });
+  }
+  return results;
+}
+
+async function searchZenodo(query: string): Promise<RawResult[]> {
+  const url = `https://zenodo.org/api/records/?q=${encodeURIComponent(query)}&size=6`;
+  const res = await fetch(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    hits?: {
+      hits?: {
+        id: number;
+        metadata: { title: string; creators?: { name: string }[]; publication_date?: string };
+        files?: { key: string; links: { self: string } }[];
+      }[];
+    };
+  };
+
+  const results: RawResult[] = [];
+  for (const record of data.hits?.hits || []) {
+    const file = (record.files || []).find((f) => /\.(pdf|epub|txt)$/i.test(f.key));
+    if (!file) continue;
+    const ext = file.key.split('.').pop()?.toLowerCase();
+    const format: RawResult['format'] = ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : 'pdf';
+
+    results.push({
+      id: `zenodo-${record.id}`,
+      source: 'zenodo',
+      title: record.metadata.title,
+      authors: (record.metadata.creators || []).map((c) => c.name).join(', ') || '未知作者',
+      year: record.metadata.publication_date?.slice(0, 4),
+      format,
+      rawUrl: file.links.self,
+    });
+  }
+  return results;
+}
+
+async function searchPmc(query: string): Promise<RawResult[]> {
+  // Step 1: find matching PMC IDs.
+  const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term=${encodeURIComponent(
+    query
+  )}&retmax=6&retmode=json`;
+  const searchRes = await fetch(searchUrl);
+  if (!searchRes.ok) return [];
+  const searchData = (await searchRes.json()) as { esearchresult?: { idlist?: string[] } };
+  const uids = searchData.esearchresult?.idlist || [];
+  if (uids.length === 0) return [];
+
+  // Step 2: batch-fetch titles/authors/year for all of them at once.
+  const summaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pmc&id=${uids.join(',')}&retmode=json`;
+  const summaryRes = await fetch(summaryUrl);
+  const summaryData = summaryRes.ok
+    ? ((await summaryRes.json()) as { result?: Record<string, { title?: string; authors?: { name: string }[]; pubdate?: string }> })
+    : { result: {} };
+
+  // Step 3: check which of these are actually in the PMC Open Access subset
+  // (most PMC articles are NOT full-text-downloadable without a subscription).
+  const oaChecks = await Promise.all(
+    uids.map(async (uid) => {
+      const pmcId = `PMC${uid}`;
+      try {
+        const oaRes = await fetch(`https://www.ncbi.nlm.nih.gov/pmc/utils/oa/oa.fcgi?id=${pmcId}`);
+        if (!oaRes.ok) return null;
+        const xml = await oaRes.text();
+        const pdfMatch = /<link format="pdf"[^>]*href="(.*?)"/.exec(xml);
+        return pdfMatch ? { uid, pmcId, pdfUrl: pdfMatch[1] } : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const results: RawResult[] = [];
+  for (const check of oaChecks) {
+    if (!check) continue;
+    const meta = summaryData.result?.[check.uid];
+    if (!meta) continue;
+
+    results.push({
+      id: `pmc-${check.pmcId}`,
+      source: 'pmc',
+      title: meta.title || check.pmcId,
+      authors: (meta.authors || []).map((a) => a.name).join(', ') || '未知作者',
+      year: meta.pubdate?.slice(0, 4),
+      format: 'pdf',
+      rawUrl: check.pdfUrl.startsWith('http') ? check.pdfUrl : `https:${check.pdfUrl}`,
+    });
+  }
+  return results;
+}
+
 export async function GET(req: NextRequest) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
   const session = await getSession(sessionId);
@@ -157,7 +313,16 @@ export async function GET(req: NextRequest) {
 
   try {
     const env = getEnv();
-    const [arxivResults, gutenbergResults, semanticScholarResults, coreResults] = await Promise.all([
+    const [
+      arxivResults,
+      gutenbergResults,
+      semanticScholarResults,
+      coreResults,
+      openAlexResults,
+      crossrefResults,
+      zenodoResults,
+      pmcResults,
+    ] = await Promise.all([
       searchArxiv(query).catch((e) => {
         console.error('[external-search] arxiv failed', e);
         return [];
@@ -174,9 +339,34 @@ export async function GET(req: NextRequest) {
         console.error('[external-search] core failed', e);
         return [];
       }),
+      searchOpenAlex(query).catch((e) => {
+        console.error('[external-search] openalex failed', e);
+        return [];
+      }),
+      searchCrossref(query).catch((e) => {
+        console.error('[external-search] crossref failed', e);
+        return [];
+      }),
+      searchZenodo(query).catch((e) => {
+        console.error('[external-search] zenodo failed', e);
+        return [];
+      }),
+      searchPmc(query).catch((e) => {
+        console.error('[external-search] pmc failed', e);
+        return [];
+      }),
     ]);
 
-    const rawResults = [...arxivResults, ...gutenbergResults, ...semanticScholarResults, ...coreResults];
+    const rawResults = [
+      ...arxivResults,
+      ...gutenbergResults,
+      ...semanticScholarResults,
+      ...coreResults,
+      ...openAlexResults,
+      ...crossrefResults,
+      ...zenodoResults,
+      ...pmcResults,
+    ];
     const results: ExternalSearchResult[] = await Promise.all(
       rawResults.map(async ({ rawUrl, ...rest }) => ({ ...rest, fileUrl: await signUrl(rawUrl) }))
     );

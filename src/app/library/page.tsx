@@ -46,6 +46,16 @@ function truncateTitle(title: string, maxWords: number = 4): string {
 }
 
 
+function externalSourceLabel(source: ExternalSearchResult['source']): string {
+  switch (source) {
+    case 'arxiv': return 'arXiv';
+    case 'gutenberg': return 'Project Gutenberg';
+    case 'semanticscholar': return 'Semantic Scholar';
+    case 'core': return 'CORE';
+    default: return source;
+  }
+}
+
 function LibraryPageContent() {
   const { toast } = useToast();
   const router = useRouter();
@@ -296,7 +306,7 @@ function LibraryPageContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
             <CardDescription>
-              搜索 arXiv（学术论文预印本）和 Project Gutenberg（公共领域电子书），点击"阅读"直接在线浏览，不会占用你的存储空间。
+              搜索 arXiv、Semantic Scholar（学术论文）和 Project Gutenberg（公共领域电子书），点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -320,7 +330,7 @@ function LibraryPageContent() {
                     <div className="min-w-0">
                       <p className="font-medium truncate">{result.title}</p>
                       <p className="text-sm text-muted-foreground truncate">
-                        {result.authors}{result.year ? ` · ${result.year}` : ''} · {result.source === 'arxiv' ? 'arXiv' : 'Project Gutenberg'} · {result.format.toUpperCase()}
+                        {result.authors}{result.year ? ` · ${result.year}` : ''} · {externalSourceLabel(result.source)} · {result.format.toUpperCase()}
                       </p>
                     </div>
                     <Button

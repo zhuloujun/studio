@@ -14,6 +14,10 @@ export interface CloudflareEnv {
   // Plain vars, safe to keep in wrangler.toml [vars]
   ADMIN_EMAIL: string;
   RESEND_FROM_EMAIL: string;
+  // Optional: enables the CORE literature source in /api/external-search
+  // when set. Free key from https://core.ac.uk/services/api - the feature
+  // just silently skips CORE results if this isn't configured.
+  CORE_API_KEY?: string;
 }
 
 /**

@@ -1,14 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
-
-// Only these hosts can be fetched through this proxy - prevents this
-// endpoint from being abused as an open SSRF relay to arbitrary URLs.
-const ALLOWED_HOSTS = [
-  'arxiv.org',
-  'export.arxiv.org',
-  'gutenberg.org',
-  'www.gutenberg.org',
-];
+import { verifySignedUrl } from '@/lib/urlSigning';
 
 export async function GET(req: NextRequest) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
@@ -17,9 +9,18 @@ export async function GET(req: NextRequest) {
     return new NextResponse('Unauthorized', { status: 401 });
   }
 
-  const targetUrl = req.nextUrl.searchParams.get('url');
-  if (!targetUrl) {
+  const token = req.nextUrl.searchParams.get('url');
+  if (!token) {
     return new NextResponse('Missing url', { status: 400 });
+  }
+
+  // Only fetch URLs that were signed by our own /api/external-search moments
+  // ago - this is what prevents this endpoint from being used as an open
+  // SSRF relay, without needing to maintain a fixed domain allowlist (open
+  // access papers/books are hosted on all kinds of domains).
+  const targetUrl = await verifySignedUrl(token);
+  if (!targetUrl) {
+    return new NextResponse('Invalid or expired url', { status: 403 });
   }
 
   let parsed: URL;
@@ -28,14 +29,14 @@ export async function GET(req: NextRequest) {
   } catch {
     return new NextResponse('Invalid url', { status: 400 });
   }
-
-  if (parsed.protocol !== 'https:' || !ALLOWED_HOSTS.includes(parsed.hostname)) {
+  if (parsed.protocol !== 'https:') {
     return new NextResponse('URL not allowed', { status: 403 });
   }
 
   try {
     const upstream = await fetch(parsed.toString(), {
       headers: { 'User-Agent': 'MangaTalk/1.0 (open-access literature reader)' },
+      redirect: 'follow',
     });
 
     if (!upstream.ok || !upstream.body) {

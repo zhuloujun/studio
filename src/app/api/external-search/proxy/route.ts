@@ -35,12 +35,26 @@ export async function GET(req: NextRequest) {
 
   try {
     const upstream = await fetch(parsed.toString(), {
-      headers: { 'User-Agent': 'MangaTalk/1.0 (open-access literature reader)' },
+      headers: {
+        // Some open-access hosts (repositories, university servers) reject
+        // requests that don't look like they come from a real browser.
+        // This won't get past dedicated bot-protection systems (those check
+        // far more than headers), but it does help with simpler filters.
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+        Accept: 'application/pdf,text/html,application/xhtml+xml,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+      },
       redirect: 'follow',
     });
 
     if (!upstream.ok || !upstream.body) {
-      return new NextResponse('Upstream fetch failed', { status: 502 });
+      // Distinguish "the source rejected/blocked us" from a hard network
+      // failure so the client can show an accurate message instead of a bare
+      // status code.
+      return new NextResponse('Source rejected the request (likely bot protection on their end)', {
+        status: 502,
+      });
     }
 
     const headers = new Headers();

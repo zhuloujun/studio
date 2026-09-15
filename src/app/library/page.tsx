@@ -169,14 +169,14 @@ function LibraryPageContent() {
       }
       router.push(`/reader?docId=${encodeURIComponent(doc.id)}`);
     } catch (e: any) {
-      const isExpired = typeof e?.message === 'string' && e.message.includes('403');
-      toast({
-        variant: 'destructive',
-        title: '打开失败',
-        description: isExpired
-          ? '这条搜索结果的链接已过期，请重新搜索一次再打开。'
-          : e?.message || '获取文献内容失败。',
-      });
+      const status = typeof e?.message === 'string' ? e.message.match(/HTTP (\d+)/)?.[1] : undefined;
+      let description = e?.message || '获取文献内容失败。';
+      if (status === '403') {
+        description = '这条搜索结果的链接已过期，请重新搜索一次再打开。';
+      } else if (status === '502') {
+        description = '该文献所在的平台拒绝了我们的访问请求（对方有反爬虫限制），暂时无法在本站直接打开，建议前往原平台查看。';
+      }
+      toast({ variant: 'destructive', title: '打开失败', description });
     } finally {
       setOpeningExternalId(null);
     }

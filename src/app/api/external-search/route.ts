@@ -107,6 +107,33 @@ async function searchGutenberg(query: string): Promise<RawResult[]> {
   return results;
 }
 
+// Major publisher platforms that reliably block non-browser (server-side)
+// fetches even for genuinely open-access content - Semantic Scholar's
+// openAccessPdf link often points here, but our proxy fetching it will just
+// get rejected by their bot protection. Better to leave these out of the
+// results than show a link that looks openable but never actually works.
+const BOT_HOSTILE_HOSTS = [
+  'link.springer.com',
+  'springer.com',
+  'onlinelibrary.wiley.com',
+  'wiley.com',
+  'tandfonline.com',
+  'jstor.org',
+  'ieeexplore.ieee.org',
+  'dl.acm.org',
+  'sciencedirect.com',
+  'nature.com',
+];
+
+function isLikelyFetchable(rawUrl: string): boolean {
+  try {
+    const host = new URL(rawUrl).hostname;
+    return !BOT_HOSTILE_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`));
+  } catch {
+    return false;
+  }
+}
+
 async function searchSemanticScholar(query: string): Promise<RawResult[]> {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
     query
@@ -121,7 +148,7 @@ async function searchSemanticScholar(query: string): Promise<RawResult[]> {
   for (const paper of data.data || []) {
     // Only include papers that actually have a fetchable open-access PDF -
     // Semantic Scholar indexes far more papers than are actually open access.
-    if (!paper.openAccessPdf?.url) continue;
+    if (!paper.openAccessPdf?.url || !isLikelyFetchable(paper.openAccessPdf.url)) continue;
 
     results.push({
       id: `semanticscholar-${paper.paperId}`,
@@ -178,7 +205,7 @@ async function searchOpenAlex(query: string): Promise<RawResult[]> {
 
   const results: RawResult[] = [];
   for (const work of data.results || []) {
-    if (!work.open_access?.is_oa || !work.open_access.oa_url) continue;
+    if (!work.open_access?.is_oa || !work.open_access.oa_url || !isLikelyFetchable(work.open_access.oa_url)) continue;
     const workId = work.id.split('/').pop() || work.id;
 
     results.push({
@@ -215,7 +242,7 @@ async function searchCrossref(query: string): Promise<RawResult[]> {
     // Crossref is primarily a DOI/metadata registry - only some records
     // (mostly fully open-access journals) also list a direct full-text link.
     const pdfLink = item.link?.find((l) => l['content-type']?.includes('pdf'));
-    if (!pdfLink || !item.title?.[0]) continue;
+    if (!pdfLink || !item.title?.[0] || !isLikelyFetchable(pdfLink.URL)) continue;
 
     results.push({
       id: `crossref-${item.DOI}`,

@@ -336,7 +336,7 @@ function LibraryPageContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
             <CardDescription>
-              目前先接入 Semantic Scholar（学术论文）验证效果，确认稳定后会逐步加回其他数据源。点击"阅读"直接在线浏览，不会占用你的存储空间。
+              目前接入 arXiv 和 Semantic Scholar（学术论文），两个源并行搜索验证速度和效果，确认稳定后会逐步加回其他数据源。点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>
           </CardHeader>
           <CardContent>

@@ -46,7 +46,7 @@ interface RawResult {
 }
 
 async function searchArxiv(query: string): Promise<RawResult[]> {
-  const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=6`;
+  const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=10`;
   const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const xml = await res.text();
@@ -137,7 +137,7 @@ function isLikelyFetchable(rawUrl: string): boolean {
 async function searchSemanticScholar(query: string): Promise<RawResult[]> {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
     query
-  )}&fields=title,authors,year,openAccessPdf&limit=6`;
+  )}&fields=title,authors,year,openAccessPdf&limit=20`;
   const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
@@ -454,7 +454,14 @@ export async function GET(req: NextRequest) {
   // confirm the whole search -> read pipeline is solid end to end. Add
   // entries back to this list to re-enable them - each function is still
   // fully implemented below, just not called for now.
-  const ENABLED_SOURCES: ExternalSearchResult['source'][] = ['semanticscholar'];
+  // Both of these are "one request, one answer" sources with no internal
+  // multi-step chains, so running them together is a good test of whether
+  // parallel (Promise.all) search across sources stays fast - PMC and
+  // Internet Archive each do several sequential sub-requests internally
+  // (search -> lookup details -> confirm downloadable) and are left out for
+  // now since THAT'S what previously made the overall search feel slow,
+  // not the number of sources running in parallel.
+  const ENABLED_SOURCES: ExternalSearchResult['source'][] = ['semanticscholar', 'arxiv'];
 
   try {
     const env = getEnv();

@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink } from 'lucide-react';
+import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
@@ -80,6 +80,7 @@ function LibraryPageContent() {
   const [externalResults, setExternalResults] = useState<ExternalSearchResult[]>([]);
   const [isSearchingExternal, setIsSearchingExternal] = useState(false);
   const [openingExternalId, setOpeningExternalId] = useState<string | null>(null);
+  const [savingExternalId, setSavingExternalId] = useState<string | null>(null);
   const [externalSearchError, setExternalSearchError] = useState('');
 
   const { locale } = useContext(LanguageContext);
@@ -125,9 +126,14 @@ function LibraryPageContent() {
       ).toString();
     }
     // Restore the last external literature search so refreshing the page
-    // (or navigating away and back) doesn't lose it.
+    // (or navigating away and back) doesn't lose it - but only if it's
+    // still within the signed-download-link validity window (4 hours, see
+    // urlSigning.ts). Restoring an older cache would show results whose
+    // "read" links have already expired, which just looks like a broken
+    // link with no obvious cause.
     const cachedSearch = LocalStorageService.loadExternalSearchCache<ExternalSearchResult>();
-    if (cachedSearch) {
+    const CACHE_MAX_AGE_MS = 3.5 * 60 * 60 * 1000;
+    if (cachedSearch && Date.now() - cachedSearch.savedAt < CACHE_MAX_AGE_MS) {
       setExternalQuery(cachedSearch.query);
       setExternalResults(cachedSearch.results);
     }
@@ -155,6 +161,26 @@ function LibraryPageContent() {
     }
   };
 
+  const handleSaveExternalResult = async (result: ExternalSearchResult) => {
+    setSavingExternalId(result.id);
+    try {
+      const doc = await fetchExternalDocument(result);
+      // Give it a fresh id distinct from the search-result id: that prefix
+      // (arxiv-/gutenberg-/etc.) is what marks a document as ephemeral
+      // (see ephemeralDocumentStore.ts) - a genuinely saved copy needs its
+      // own real id so it gets uploaded to R2/D1 like any other document,
+      // not treated as a throwaway search result.
+      const savedDoc: StoredMangaDocument = { ...doc, id: crypto.randomUUID(), createdAt: Date.now() };
+      await IndexedDBService.saveDocument(savedDoc);
+      toast({ title: '已收藏', description: `《${result.title}》已保存到你的书库。` });
+      await fetchDocuments(true);
+    } catch (e: any) {
+      toast({ variant: 'destructive', title: '收藏失败', description: e?.message || '保存文献失败。' });
+    } finally {
+      setSavingExternalId(null);
+    }
+  };
+
   const handleOpenExternalResult = async (result: ExternalSearchResult) => {
     setOpeningExternalId(result.id);
     try {
@@ -176,6 +202,8 @@ function LibraryPageContent() {
         description = '这条搜索结果的链接已过期，请重新搜索一次再打开。';
       } else if (status === '502') {
         description = '该文献所在的平台拒绝了我们的访问请求（对方有反爬虫限制），暂时无法在本站直接打开，建议前往原平台查看。';
+      } else if (status === '413') {
+        description = '这份文献文件过大（超过 40MB），暂不支持在线打开，建议前往原平台下载查看。';
       }
       toast({ variant: 'destructive', title: '打开失败', description });
     } finally {
@@ -364,19 +392,33 @@ function LibraryPageContent() {
                         {result.authors}{result.year ? ` · ${result.year}` : ''} · {externalSourceLabel(result.source)} · {result.format.toUpperCase()}
                       </p>
                     </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="flex-shrink-0"
-                      onClick={() => handleOpenExternalResult(result)}
-                      disabled={openingExternalId === result.id}
-                    >
-                      {openingExternalId === result.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <>阅读 <ExternalLink className="ml-1 h-3 w-3" /></>
-                      )}
-                    </Button>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleSaveExternalResult(result)}
+                        disabled={savingExternalId === result.id}
+                        title="收藏到书库"
+                      >
+                        {savingExternalId === result.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Star className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleOpenExternalResult(result)}
+                        disabled={openingExternalId === result.id}
+                      >
+                        {openingExternalId === result.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <>阅读 <ExternalLink className="ml-1 h-3 w-3" /></>
+                        )}
+                      </Button>
+                    </div>
                   </li>
                 ))}
               </ul>

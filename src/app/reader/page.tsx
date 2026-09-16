@@ -1851,7 +1851,7 @@ HighlightableContent.displayName = 'HighlightableContent';
   const mainButtonState = getMainButtonState();
   
   const showInitialLoader = isLoadingDoc && !activeDoc && !docErrorMessage;
-  const showDocumentError = docErrorMessage && !activeDoc;
+  const showDocumentError = !!docErrorMessage;
   
   const groupedLocalVoices = groupVoicesByLanguage(availableVoices);
 

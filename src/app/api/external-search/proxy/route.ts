@@ -57,12 +57,45 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    // Some sources (scanned books especially, e.g. Internet Archive) can be
+    // very large - streaming an oversized file through the Worker is what
+    // was causing "Error 1102: Worker exceeded resource limits" crashes
+    // (and, worse, occasionally leaving the Worker instance in a bad state
+    // for a moment afterwards, making unrelated requests fail too). Reject
+    // clearly up front instead of risking that.
+    const MAX_BYTES = 40 * 1024 * 1024; // 40MB
+    const declaredLength = upstream.headers.get('content-length');
+    if (declaredLength && parseInt(declaredLength, 10) > MAX_BYTES) {
+      return new NextResponse('File too large', { status: 413 });
+    }
+
     const headers = new Headers();
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     headers.set('Content-Type', contentType);
-    const contentLength = upstream.headers.get('content-length');
-    if (contentLength) headers.set('Content-Length', contentLength);
+    if (declaredLength) headers.set('Content-Length', declaredLength);
     headers.set('Cache-Control', 'private, max-age=3600');
+
+    // No Content-Length was declared (common with chunked responses) - guard
+    // against an unexpectedly huge body by counting bytes as they stream
+    // through and aborting if the limit is exceeded, rather than trusting
+    // the source to be well-behaved.
+    if (!declaredLength) {
+      let total = 0;
+      let aborted = false;
+      const limiter = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          total += chunk.byteLength;
+          if (total > MAX_BYTES) {
+            aborted = true;
+            controller.error(new Error('File too large'));
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+      });
+      const limitedBody = upstream.body.pipeThrough(limiter);
+      return new NextResponse(limitedBody, { status: 200, headers });
+    }
 
     return new NextResponse(upstream.body, { status: 200, headers });
   } catch (err) {

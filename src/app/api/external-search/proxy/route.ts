@@ -13,6 +13,13 @@ export async function GET(req: NextRequest) {
   if (!token) {
     return new NextResponse('Missing url', { status: 400 });
   }
+  // When present, forces a real browser download (Content-Disposition:
+  // attachment) instead of streaming the file for our own reader to parse.
+  // This is also why it gets a much higher size ceiling below: a download
+  // is a pure byte pass-through to the browser's download manager, not
+  // buffered into memory for pdf.js/mammoth/etc. to parse, so it doesn't
+  // carry the same crash risk that "open in reader" does.
+  const downloadFilename = req.nextUrl.searchParams.get('download');
 
   // Only fetch URLs that were signed by our own /api/external-search moments
   // ago - this is what prevents this endpoint from being used as an open
@@ -58,12 +65,13 @@ export async function GET(req: NextRequest) {
     }
 
     // Some sources (scanned books especially, e.g. Internet Archive) can be
-    // very large - streaming an oversized file through the Worker is what
-    // was causing "Error 1102: Worker exceeded resource limits" crashes
-    // (and, worse, occasionally leaving the Worker instance in a bad state
-    // for a moment afterwards, making unrelated requests fail too). Reject
-    // clearly up front instead of risking that.
-    const MAX_BYTES = 40 * 1024 * 1024; // 40MB
+    // very large - streaming an oversized file through the Worker for our
+    // OWN reader to parse is what was causing "Error 1102: Worker exceeded
+    // resource limits" crashes (and, worse, occasionally leaving the Worker
+    // instance in a bad state for a moment afterwards, making unrelated
+    // requests fail too). A plain download doesn't get parsed by anything
+    // on our side, so it gets a much more generous ceiling.
+    const MAX_BYTES = downloadFilename ? 250 * 1024 * 1024 : 40 * 1024 * 1024;
     const declaredLength = upstream.headers.get('content-length');
     if (declaredLength && parseInt(declaredLength, 10) > MAX_BYTES) {
       return new NextResponse('File too large', { status: 413 });
@@ -74,6 +82,11 @@ export async function GET(req: NextRequest) {
     headers.set('Content-Type', contentType);
     if (declaredLength) headers.set('Content-Length', declaredLength);
     headers.set('Cache-Control', 'private, max-age=3600');
+    if (downloadFilename) {
+      // Quote-escape the filename per RFC 6266; browsers fall back gracefully
+      // for any characters they don't like.
+      headers.set('Content-Disposition', `attachment; filename="${downloadFilename.replace(/"/g, "'")}"`);
+    }
 
     // No Content-Length was declared (common with chunked responses) - guard
     // against an unexpectedly huge body by counting bytes as they stream

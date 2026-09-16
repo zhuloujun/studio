@@ -183,11 +183,15 @@ function isLikelyFetchable(rawUrl: string): boolean {
   }
 }
 
-async function searchSemanticScholar(query: string): Promise<RawResult[]> {
+async function searchSemanticScholar(query: string, apiKey: string | undefined): Promise<RawResult[]> {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
     query
   )}&fields=title,authors,year,openAccessPdf&limit=20`;
-  const res = await fetchWithTimeout(url);
+  // Without an API key this shares the single global rate-limit pool for
+  // every unauthenticated Semantic Scholar request on the internet, and
+  // gets silently throttled fairly often - which looked identical to "no
+  // results from this source" before this comment was added.
+  const res = await fetchWithTimeout(url, apiKey ? { headers: { 'x-api-key': apiKey } } : undefined);
   if (!res.ok) return [];
   const data = (await res.json()) as {
     data?: { paperId: string; title: string; year?: number; authors?: { name: string }[]; openAccessPdf?: { url: string } | null }[];
@@ -562,7 +566,7 @@ export async function GET(req: NextRequest) {
     const sourceRunners: Record<ExternalSearchResult['source'], () => Promise<RawResult[]>> = {
       arxiv: () => searchArxiv(query),
       gutenberg: () => searchGutenberg(query),
-      semanticscholar: () => searchSemanticScholar(query),
+      semanticscholar: () => searchSemanticScholar(query, env.SEMANTIC_SCHOLAR_API_KEY),
       core: () => searchCore(query, env.CORE_API_KEY),
       openalex: () => searchOpenAlex(query),
       crossref: () => searchCrossref(query),

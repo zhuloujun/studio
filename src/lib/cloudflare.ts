@@ -18,6 +18,11 @@ export interface CloudflareEnv {
   // when set. Free key from https://core.ac.uk/services/api - the feature
   // just silently skips CORE results if this isn't configured.
   CORE_API_KEY?: string;
+  // Optional: without this, Semantic Scholar search shares the same public
+  // rate-limit pool as every other unauthenticated request on the internet,
+  // and gets silently throttled/empty-results fairly often. Free key from
+  // https://www.semanticscholar.org/product/api#api-key.
+  SEMANTIC_SCHOLAR_API_KEY?: string;
 }
 
 /**

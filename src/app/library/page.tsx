@@ -406,8 +406,10 @@ function LibraryPageContent() {
                           <Star className="h-4 w-4" />
                         )}
                       </Button>
-                      <Button size="sm" variant="ghost" asChild title="下载到本地设备（不经过本站，没有大小限制）">
-                        <a href={result.originalUrl} target="_blank" rel="noopener noreferrer" download>
+                      <Button size="sm" variant="ghost" asChild title="下载到本地设备（没有大小限制）">
+                        <a
+                          href={`/api/external-search/proxy?url=${encodeURIComponent(result.fileUrl)}&download=${encodeURIComponent(`${result.title}.${result.format}`)}`}
+                        >
                           <Download className="h-4 w-4" />
                         </a>
                       </Button>

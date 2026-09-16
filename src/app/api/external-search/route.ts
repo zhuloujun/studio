@@ -23,7 +23,7 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
 
 export interface ExternalSearchResult {
   id: string;
-  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc' | 'hcommons' | 'archive';
+  source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc' | 'hcommons' | 'archive' | 'doaj';
   category: 'academic' | 'medicine' | 'books';
   title: string;
   authors: string;
@@ -47,6 +47,45 @@ interface RawResult {
 }
 
 // ============ Academic ============
+
+// Zenodo and Knowledge Commons Works both run InvenioRDM, but different
+// versions/deployments of it have returned the record's file list in two
+// different shapes over time: a flat array, or an object keyed by filename
+// under `entries`. Rather than guess which one a given deployment uses (and
+// silently drop every real match if we guess wrong - which is very likely
+// what was happening here), this checks both.
+function extractInvenioFile(
+  files: unknown
+): { key: string; url: string } | undefined {
+  if (!files || typeof files !== 'object') return undefined;
+
+  // Check the plain-array shape FIRST: arrays have a built-in `.entries()`
+  // method (not a data property), which would otherwise be mistaken for the
+  // "object keyed by filename" shape below.
+  let candidates: any[];
+  if (Array.isArray(files)) {
+    candidates = files;
+  } else if ((files as any).entries && typeof (files as any).entries === 'object') {
+    candidates = Object.values((files as any).entries);
+  } else {
+    candidates = [];
+  }
+
+  for (const f of candidates) {
+    const key: string | undefined = f?.key;
+    const url: string | undefined = f?.links?.content || f?.links?.self || f?.links?.download;
+    if (key && url && /\.(pdf|epub|txt|mobi|docx)$/i.test(key)) {
+      return { key, url };
+    }
+  }
+  return undefined;
+}
+
+function formatFromExtension(key: string): RawResult['format'] {
+  const ext = key.split('.').pop()?.toLowerCase();
+  return ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : ext === 'docx' ? 'docx' : 'pdf';
+}
+
 async function searchArxiv(query: string): Promise<RawResult[]> {
   const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=10`;
   const res = await fetchWithTimeout(url);
@@ -166,6 +205,46 @@ async function searchSemanticScholar(query: string): Promise<RawResult[]> {
   return results;
 }
 
+async function searchDoaj(query: string): Promise<RawResult[]> {
+  // DOAJ (Directory of Open Access Journals) only indexes journals that are
+  // ENTIRELY open access by policy - unlike Semantic Scholar's broader index
+  // (mixed open/paywalled), so links found here are much more likely to
+  // actually be fetchable.
+  const url = `https://doaj.org/api/search/articles/${encodeURIComponent(query)}?pageSize=10`;
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) return [];
+  const data = (await res.json()) as {
+    results?: {
+      id: string;
+      bibjson?: {
+        title?: string;
+        author?: { name?: string }[];
+        year?: string;
+        link?: { url: string; type?: string }[];
+      };
+    }[];
+  };
+
+  const results: RawResult[] = [];
+  for (const item of data.results || []) {
+    const bib = item.bibjson;
+    if (!bib?.title) continue;
+    const fulltextLink = bib.link?.find((l) => l.type === 'fulltext') || bib.link?.[0];
+    if (!fulltextLink?.url || !isLikelyFetchable(fulltextLink.url)) continue;
+
+    results.push({
+      id: `doaj-${item.id}`,
+      source: 'doaj',
+      title: bib.title,
+      authors: (bib.author || []).map((a) => a.name).filter(Boolean).join(', ') || '未知作者',
+      year: bib.year,
+      format: 'pdf',
+      rawUrl: fulltextLink.url,
+    });
+  }
+  return results;
+}
+
 async function searchCore(query: string, apiKey: string | undefined): Promise<RawResult[]> {
   if (!apiKey) return []; // Silently skipped when no key is configured.
 
@@ -261,7 +340,7 @@ async function searchCrossref(query: string): Promise<RawResult[]> {
 }
 
 async function searchZenodo(query: string): Promise<RawResult[]> {
-  const url = `https://zenodo.org/api/records/?q=${encodeURIComponent(query)}&size=6`;
+  const url = `https://zenodo.org/api/records/?q=${encodeURIComponent(query)}&size=10`;
   const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
@@ -269,18 +348,15 @@ async function searchZenodo(query: string): Promise<RawResult[]> {
       hits?: {
         id: number;
         metadata: { title: string; creators?: { name: string }[]; publication_date?: string };
-        files?: { key: string; links: { self: string } }[];
+        files?: unknown;
       }[];
     };
   };
 
   const results: RawResult[] = [];
   for (const record of data.hits?.hits || []) {
-    const file = (record.files || []).find((f) => /\.(pdf|epub|txt|mobi|docx)$/i.test(f.key));
+    const file = extractInvenioFile(record.files);
     if (!file) continue;
-    const ext = file.key.split('.').pop()?.toLowerCase();
-    const format: RawResult['format'] =
-      ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : ext === 'docx' ? 'docx' : 'pdf';
 
     results.push({
       id: `zenodo-${record.id}`,
@@ -288,8 +364,8 @@ async function searchZenodo(query: string): Promise<RawResult[]> {
       title: record.metadata.title,
       authors: (record.metadata.creators || []).map((c) => c.name).join(', ') || '未知作者',
       year: record.metadata.publication_date?.slice(0, 4),
-      format,
-      rawUrl: file.links.self,
+      format: formatFromExtension(file.key),
+      rawUrl: file.url,
     });
   }
   return results;
@@ -353,7 +429,7 @@ async function searchPmc(query: string): Promise<RawResult[]> {
 async function searchHCommons(query: string): Promise<RawResult[]> {
   // works.hcommons.org (KCWorks) runs on InvenioRDM - the same open-source
   // platform behind Zenodo - so the API shape is essentially identical.
-  const url = `https://works.hcommons.org/api/records?q=${encodeURIComponent(query)}&size=6`;
+  const url = `https://works.hcommons.org/api/records?q=${encodeURIComponent(query)}&size=10`;
   const res = await fetchWithTimeout(url);
   if (!res.ok) return [];
   const data = (await res.json()) as {
@@ -361,19 +437,15 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
       hits?: {
         id: string;
         metadata: { title: string; creators?: { person_or_org?: { name?: string } }[]; publication_date?: string };
-        files?: { entries?: Record<string, { key: string; links: { content: string } }> };
+        files?: unknown;
       }[];
     };
   };
 
   const results: RawResult[] = [];
   for (const record of data.hits?.hits || []) {
-    const entries = Object.values(record.files?.entries || {});
-    const file = entries.find((f) => /\.(pdf|epub|txt|mobi|docx)$/i.test(f.key));
+    const file = extractInvenioFile(record.files);
     if (!file) continue;
-    const ext = file.key.split('.').pop()?.toLowerCase();
-    const format: RawResult['format'] =
-      ext === 'epub' ? 'epub' : ext === 'txt' ? 'txt' : ext === 'mobi' ? 'mobi' : ext === 'docx' ? 'docx' : 'pdf';
 
     results.push({
       id: `hcommons-${record.id}`,
@@ -381,8 +453,8 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
       title: record.metadata.title,
       authors: (record.metadata.creators || []).map((c) => c.person_or_org?.name).filter(Boolean).join(', ') || '未知作者',
       year: record.metadata.publication_date?.slice(0, 4),
-      format,
-      rawUrl: file.links.content,
+      format: formatFromExtension(file.key),
+      rawUrl: file.url,
     });
   }
   return results;
@@ -460,12 +532,11 @@ export async function GET(req: NextRequest) {
   // entries back to this list to re-enable them - each function is still
   // fully implemented below, just not called for now.
   // Both of these are "one request, one answer" sources with no internal
-  // multi-step chains, so running them together is a good test of whether
-  // parallel (Promise.all) search across sources stays fast - PMC and
-  // Internet Archive each do several sequential sub-requests internally
-  // (search -> lookup details -> confirm downloadable) and are left out for
-  // now since THAT'S what previously made the overall search feel slow,
-  // not the number of sources running in parallel.
+  // PMC and Internet Archive each do several sequential sub-requests
+  // internally (search -> lookup details -> confirm downloadable), so they
+  // add more latency than a single-fetch source - but per-source timeouts
+  // (SOURCE_TIMEOUT_MS) now keep a slow one from dragging out or breaking
+  // the whole search, so it's safe to run everything together.
   const ENABLED_SOURCES: ExternalSearchResult['source'][] = [
     'semanticscholar',
     'arxiv',
@@ -473,6 +544,10 @@ export async function GET(req: NextRequest) {
     'crossref',
     'zenodo',
     'pmc',
+    'hcommons',
+    'archive',
+    'gutenberg',
+    'doaj',
   ];
 
   try {
@@ -488,6 +563,7 @@ export async function GET(req: NextRequest) {
       pmc: () => searchPmc(query),
       hcommons: () => searchHCommons(query),
       archive: () => searchInternetArchive(query),
+      doaj: () => searchDoaj(query),
     };
 
     const rawResultLists = await Promise.all(
@@ -511,6 +587,7 @@ export async function GET(req: NextRequest) {
       pmc: 'medicine',
       gutenberg: 'books',
       archive: 'books',
+      doaj: 'academic',
     };
     const results: ExternalSearchResult[] = await Promise.all(
       rawResults.map(async ({ rawUrl, ...rest }) => ({

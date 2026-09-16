@@ -58,6 +58,7 @@ function externalSourceLabel(source: ExternalSearchResult['source']): string {
     case 'pmc': return 'PubMed Central';
     case 'hcommons': return 'Knowledge Commons Works';
     case 'archive': return 'Internet Archive';
+    case 'doaj': return 'DOAJ';
     default: return source;
   }
 }
@@ -336,7 +337,7 @@ function LibraryPageContent() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
             <CardDescription>
-              目前接入 arXiv、Semantic Scholar、OpenAlex、Crossref、Zenodo（学术论文）和 PubMed Central（医学文献），点击"阅读"直接在线浏览，不会占用你的存储空间。
+              目前接入 arXiv、Semantic Scholar、OpenAlex、Crossref、Zenodo、DOAJ（学术论文/期刊）、PubMed Central（医学文献）、Knowledge Commons Works、Internet Archive、Project Gutenberg（电子书，含 EPUB/TXT/MOBI 格式），点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>
           </CardHeader>
           <CardContent>

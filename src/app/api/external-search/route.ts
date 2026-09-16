@@ -24,6 +24,7 @@ async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Respon
 export interface ExternalSearchResult {
   id: string;
   source: 'arxiv' | 'gutenberg' | 'semanticscholar' | 'core' | 'openalex' | 'crossref' | 'zenodo' | 'pmc' | 'hcommons' | 'archive';
+  category: 'academic' | 'medicine' | 'books';
   title: string;
   authors: string;
   year?: string;
@@ -45,6 +46,7 @@ interface RawResult {
   rawUrl: string;
 }
 
+// ============ Academic ============
 async function searchArxiv(query: string): Promise<RawResult[]> {
   const url = `https://export.arxiv.org/api/query?search_query=all:${encodeURIComponent(query)}&start=0&max_results=10`;
   const res = await fetchWithTimeout(url);
@@ -79,6 +81,7 @@ async function searchArxiv(query: string): Promise<RawResult[]> {
   return results;
 }
 
+// ============ Books ============
 async function searchGutenberg(query: string): Promise<RawResult[]> {
   const url = `https://gutendex.com/books?search=${encodeURIComponent(query)}`;
   const res = await fetchWithTimeout(url);
@@ -292,6 +295,7 @@ async function searchZenodo(query: string): Promise<RawResult[]> {
   return results;
 }
 
+// ============ Medicine ============
 async function searchPmc(query: string): Promise<RawResult[]> {
   // Step 1: find matching PMC IDs.
   const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pmc&term=${encodeURIComponent(
@@ -384,6 +388,7 @@ async function searchHCommons(query: string): Promise<RawResult[]> {
   return results;
 }
 
+// (Books, continued)
 async function searchInternetArchive(query: string): Promise<RawResult[]> {
   const searchUrl = `https://archive.org/advancedsearch.php?q=${encodeURIComponent(
     query
@@ -461,7 +466,14 @@ export async function GET(req: NextRequest) {
   // (search -> lookup details -> confirm downloadable) and are left out for
   // now since THAT'S what previously made the overall search feel slow,
   // not the number of sources running in parallel.
-  const ENABLED_SOURCES: ExternalSearchResult['source'][] = ['semanticscholar', 'arxiv'];
+  const ENABLED_SOURCES: ExternalSearchResult['source'][] = [
+    'semanticscholar',
+    'arxiv',
+    'openalex',
+    'crossref',
+    'zenodo',
+    'pmc',
+  ];
 
   try {
     const env = getEnv();
@@ -488,8 +500,24 @@ export async function GET(req: NextRequest) {
     );
 
     const rawResults = rawResultLists.flat();
+    const CATEGORY_BY_SOURCE: Record<ExternalSearchResult['source'], ExternalSearchResult['category']> = {
+      arxiv: 'academic',
+      semanticscholar: 'academic',
+      core: 'academic',
+      openalex: 'academic',
+      crossref: 'academic',
+      zenodo: 'academic',
+      hcommons: 'academic',
+      pmc: 'medicine',
+      gutenberg: 'books',
+      archive: 'books',
+    };
     const results: ExternalSearchResult[] = await Promise.all(
-      rawResults.map(async ({ rawUrl, ...rest }) => ({ ...rest, fileUrl: await signUrl(rawUrl) }))
+      rawResults.map(async ({ rawUrl, ...rest }) => ({
+        ...rest,
+        category: CATEGORY_BY_SOURCE[rest.source],
+        fileUrl: await signUrl(rawUrl),
+      }))
     );
 
     return NextResponse.json({ success: true, results });

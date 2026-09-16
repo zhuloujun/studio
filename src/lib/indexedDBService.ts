@@ -88,7 +88,7 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
   // our own storage - editing their in-memory annotations/OCR text just
   // updates the ephemeral copy for this browser tab.
   if (isEphemeralDocId(doc.id)) {
-    setEphemeralDocument(doc);
+    await setEphemeralDocument(doc);
     return;
   }
 
@@ -108,7 +108,7 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
 
 export async function getDocumentById(id: string): Promise<StoredMangaDocument | undefined> {
   if (isEphemeralDocId(id)) {
-    return getEphemeralDocument(id);
+    return await getEphemeralDocument(id);
   }
 
   const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { credentials: 'include' });

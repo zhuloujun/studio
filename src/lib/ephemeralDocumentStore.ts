@@ -2,63 +2,99 @@
 // Hands a document from the library page's "search external literature"
 // flow to the reader page without ever writing it to R2/D1.
 //
-// This used to be a plain in-memory Map, on the assumption that Next.js
-// client-side navigation keeps the JS module alive across the transition.
-// That assumption doesn't hold reliably: /library and /reader are separate
-// route chunks, and depending on how the bundler splits shared modules, each
-// chunk can end up with its OWN instance of this module - so a write from
-// the library page's copy is invisible to the reader page's copy, and the
-// document silently "isn't found" (the reader then falls back to its blank
-// scratchpad view, which is what that looked like from the outside).
-//
-// sessionStorage is a real browser API rather than app-level module state,
-// so it doesn't have this problem - it works the same regardless of which
-// bundle chunk is asking. It only holds strings, so fileData (an
-// ArrayBuffer) is base64-encoded going in and decoded coming back out.
+// History of how this is stored, because it's tripped up twice already:
+//  1. Started as a plain in-memory Map - broke because /library and /reader
+//     are separate route chunks and can each get their own instance of the
+//     module, so a write from one page was invisible to the other.
+//  2. Switched to sessionStorage - fixed that, but sessionStorage only
+//     holds strings, so the file bytes had to be base64-encoded, and
+//     sessionStorage's ~5-10MB per-origin quota meant a lot of real PDFs
+//     didn't fit ("这份文献文件太大" errors).
+//  3. Now uses IndexedDB: a real cross-page browser API (so it doesn't have
+//     problem #1), stores the ArrayBuffer directly with no base64 inflation,
+//     and has a much larger quota (typically a large fraction of free disk
+//     space) so problem #2 goes away too.
 import type { StoredMangaDocument } from '@/types';
 
-const SESSION_KEY_PREFIX = 'mangaTalk_ephemeralDoc_';
+const DB_NAME = 'MangaTalkEphemeralDocs';
+const STORE_NAME = 'documents';
+const DB_VERSION = 1;
+const MAX_AGE_MS = 24 * 60 * 60 * 1000; // stale entries are cleaned up opportunistically
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+function openDb(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function cleanupOldEntries(db: IDBDatabase): Promise<void> {
+  try {
+    const cutoff = Date.now() - MAX_AGE_MS;
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        if ((cursor.value?.savedAt || 0) < cutoff) {
+          cursor.delete();
+        }
+        cursor.continue();
+      };
+      req.onerror = () => resolve();
+    });
+  } catch {
+    // best-effort cleanup only
   }
-  return btoa(binary);
 }
 
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
-/** Returns false if the document couldn't be stored (e.g. too large for sessionStorage's quota, typically ~5-10MB per origin). */
-export function setEphemeralDocument(doc: StoredMangaDocument): boolean {
+/** Returns false if the document couldn't be stored. */
+export async function setEphemeralDocument(doc: StoredMangaDocument): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   try {
-    const { fileData, ...metadata } = doc as StoredMangaDocument & { fileData: ArrayBuffer };
-    const payload = JSON.stringify({ ...metadata, fileDataBase64: arrayBufferToBase64(fileData) });
-    window.sessionStorage.setItem(SESSION_KEY_PREFIX + doc.id, payload);
+    const db = await openDb();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).put({ ...doc, savedAt: Date.now() });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    cleanupOldEntries(db).finally(() => db.close());
     return true;
   } catch (e) {
-    console.error('[ephemeralDocumentStore] failed to store document (likely too large for sessionStorage)', e);
+    console.error('[ephemeralDocumentStore] failed to store document', e);
     return false;
   }
 }
 
-export function getEphemeralDocument(id: string): StoredMangaDocument | undefined {
+export async function getEphemeralDocument(id: string): Promise<StoredMangaDocument | undefined> {
   if (typeof window === 'undefined') return undefined;
-  const raw = window.sessionStorage.getItem(SESSION_KEY_PREFIX + id);
-  if (!raw) return undefined;
   try {
-    const { fileDataBase64, ...rest } = JSON.parse(raw);
-    return { ...rest, fileData: base64ToArrayBuffer(fileDataBase64) } as StoredMangaDocument;
+    const db = await openDb();
+    const result = await new Promise<any>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const req = tx.objectStore(STORE_NAME).get(id);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
+    if (!result) return undefined;
+    const { savedAt, ...doc } = result;
+    return doc as StoredMangaDocument;
   } catch (e) {
-    console.error('[ephemeralDocumentStore] failed to parse stored document', e);
+    console.error('[ephemeralDocumentStore] failed to read document', e);
     return undefined;
   }
 }

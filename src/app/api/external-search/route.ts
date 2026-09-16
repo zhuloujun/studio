@@ -34,6 +34,13 @@ export interface ExternalSearchResult {
   // domains (publishers, institutional repositories, etc.), so instead of a
   // fixed domain allowlist, only URLs we ourselves just issued can be fetched.
   fileUrl: string;
+  // The real, unsigned source URL. Safe to expose directly - it's already a
+  // public link - and used for "open/download at the source" links that go
+  // straight from the browser to the source, bypassing our own proxy (and
+  // its 40MB size limit) entirely. Downloads triggered by simple navigation
+  // (an <a> tag) aren't subject to CORS the way a fetch()/XHR read would be,
+  // so this works even for sources our proxy can't read into memory.
+  originalUrl: string;
 }
 
 interface RawResult {
@@ -594,6 +601,7 @@ export async function GET(req: NextRequest) {
         ...rest,
         category: CATEGORY_BY_SOURCE[rest.source],
         fileUrl: await signUrl(rawUrl),
+        originalUrl: rawUrl,
       }))
     );
 

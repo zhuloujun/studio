@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star } from 'lucide-react';
+import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star, Download } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
@@ -405,6 +405,11 @@ function LibraryPageContent() {
                         ) : (
                           <Star className="h-4 w-4" />
                         )}
+                      </Button>
+                      <Button size="sm" variant="ghost" asChild title="下载到本地设备（不经过本站，没有大小限制）">
+                        <a href={result.originalUrl} target="_blank" rel="noopener noreferrer" download>
+                          <Download className="h-4 w-4" />
+                        </a>
                       </Button>
                       <Button
                         size="sm"

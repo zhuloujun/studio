@@ -216,6 +216,28 @@ async function searchSemanticScholar(query: string, apiKey: string | undefined):
   return results;
 }
 
+// Some publishers' "fulltext" links (as listed in DOAJ/Crossref/etc.) are
+// actually HTML landing pages, not the PDF itself - even though the article
+// genuinely is open access. Where the direct-PDF URL follows a predictable
+// pattern from the landing page URL, rewrite to it instead of feeding pdf.js
+// an HTML page (or getting flatly rejected fetching the landing page, which
+// is what was happening for MDPI: https://www.mdpi.com/<issn>/<vol>/<issue>/<article>
+// is a landing page; appending /pdf gives the real PDF).
+function resolveToDirectPdfUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.hostname === 'www.mdpi.com' || parsed.hostname === 'mdpi.com') &&
+      !parsed.pathname.endsWith('/pdf')
+    ) {
+      return `${url.replace(/\/$/, '')}/pdf`;
+    }
+    return url;
+  } catch {
+    return url;
+  }
+}
+
 async function searchDoaj(query: string): Promise<RawResult[]> {
   // DOAJ (Directory of Open Access Journals) only indexes journals that are
   // ENTIRELY open access by policy - unlike Semantic Scholar's broader index
@@ -241,7 +263,9 @@ async function searchDoaj(query: string): Promise<RawResult[]> {
     const bib = item.bibjson;
     if (!bib?.title) continue;
     const fulltextLink = bib.link?.find((l) => l.type === 'fulltext') || bib.link?.[0];
-    if (!fulltextLink?.url || !isLikelyFetchable(fulltextLink.url)) continue;
+    if (!fulltextLink?.url) continue;
+    const resolvedUrl = resolveToDirectPdfUrl(fulltextLink.url);
+    if (!isLikelyFetchable(resolvedUrl)) continue;
 
     results.push({
       id: `doaj-${item.id}`,
@@ -250,7 +274,7 @@ async function searchDoaj(query: string): Promise<RawResult[]> {
       authors: (bib.author || []).map((a) => a.name).filter(Boolean).join(', ') || '未知作者',
       year: bib.year,
       format: 'pdf',
-      rawUrl: fulltextLink.url,
+      rawUrl: resolvedUrl,
     });
   }
   return results;

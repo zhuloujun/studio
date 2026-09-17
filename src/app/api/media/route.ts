@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { mediaR2Key, putFile } from '@/lib/r2Storage';
+import { getUserUsageBytes, getDefaultQuotaBytes } from '@/lib/storageQuota';
 
 // GET: list this user's media items with metadata only, plus a streaming
 // fileUrl for each (NOT the raw bytes - loading every media file's full
@@ -62,11 +63,22 @@ export async function POST(req: NextRequest) {
     }
 
     const env = getEnv();
-    const existing = await env.DB.prepare(`SELECT user_id FROM media_items WHERE id = ?1`)
+    const existing = await env.DB.prepare(`SELECT user_id, size_bytes FROM media_items WHERE id = ?1`)
       .bind(metadata.id)
-      .first<{ user_id: string }>();
+      .first<{ user_id: string; size_bytes: number }>();
     if (existing && existing.user_id !== session.userId) {
       return NextResponse.json({ success: false, message: '媒体 ID 冲突。' }, { status: 409 });
+    }
+
+    const [usage, quota] = await Promise.all([getUserUsageBytes(session.userId), getDefaultQuotaBytes()]);
+    const projectedUsage = usage - (existing?.size_bytes || 0) + file.size;
+    if (projectedUsage > quota) {
+      const usageGB = (usage / (1024 * 1024 * 1024)).toFixed(2);
+      const quotaGB = (quota / (1024 * 1024 * 1024)).toFixed(2);
+      return NextResponse.json(
+        { success: false, message: `已超出存储空间限额（已用 ${usageGB}GB / 共 ${quotaGB}GB），请先删除一些文档或媒体文件再试。` },
+        { status: 413 }
+      );
     }
 
     const r2Key = mediaR2Key(session.userId, metadata.id);
@@ -77,11 +89,11 @@ export async function POST(req: NextRequest) {
 
     const now = Date.now();
     await env.DB.prepare(
-      `INSERT INTO media_items (id, user_id, r2_key, metadata_json, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(id) DO UPDATE SET metadata_json = ?4, r2_key = ?3`
+      `INSERT INTO media_items (id, user_id, r2_key, metadata_json, created_at, size_bytes)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+       ON CONFLICT(id) DO UPDATE SET metadata_json = ?4, r2_key = ?3, size_bytes = ?6`
     )
-      .bind(metadata.id, session.userId, r2Key, metadataRaw, now)
+      .bind(metadata.id, session.userId, r2Key, metadataRaw, now, file.size)
       .run();
 
     return NextResponse.json({ success: true, id: metadata.id });

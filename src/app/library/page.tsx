@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star, Download } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
+import { getLibraryLink } from '@/lib/authService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
@@ -92,6 +93,7 @@ function LibraryPageContent() {
   const [openingExternalId, setOpeningExternalId] = useState<string | null>(null);
   const [savingExternalId, setSavingExternalId] = useState<string | null>(null);
   const [externalSearchError, setExternalSearchError] = useState('');
+  const [libraryLink, setLibraryLink] = useState<{ url: string; label: string } | null>(null);
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -147,6 +149,8 @@ function LibraryPageContent() {
       setExternalQuery(cachedSearch.query);
       setExternalResults(cachedSearch.results);
     }
+
+    getLibraryLink().then(setLibraryLink);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array ensures this runs only once on mount
@@ -376,7 +380,16 @@ function LibraryPageContent() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
+              {libraryLink && (
+                <Button size="sm" variant="outline" asChild>
+                  <a href={libraryLink.url} target="_blank" rel="noopener noreferrer">
+                    {libraryLink.label} <ExternalLink className="ml-1 h-3 w-3" />
+                  </a>
+                </Button>
+              )}
+            </div>
             <CardDescription>
               目前接入 arXiv、Semantic Scholar、OpenAlex、Crossref、Zenodo、DOAJ（学术论文/期刊）、PubMed Central（医学文献）、Knowledge Commons Works、Internet Archive、Project Gutenberg（电子书，含 EPUB/TXT/MOBI 格式），点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>

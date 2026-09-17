@@ -154,6 +154,56 @@ export const requestAdminLoginUrlChangeOtp = () => postJson<ApiResult>('/api/adm
 export const changeAdminLoginUrl = (code: string, newSlug: string) =>
   postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { code, newSlug });
 
+// --- "文献库" quick-link (admin-configurable button shown above the external literature search) ---
+
+export const getLibraryLink = async (): Promise<{ url: string; label: string } | null> => {
+  try {
+    const res = await fetch('/api/settings/library-link', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { success: boolean; link?: { url: string; label: string } | null };
+    return data.success ? data.link || null : null;
+  } catch {
+    return null;
+  }
+};
+
+export const getLibraryLinkForAdmin = async (): Promise<{ url: string; label: string }> => {
+  try {
+    const res = await fetch('/api/admin/library-link', { credentials: 'include' });
+    if (!res.ok) return { url: '', label: '' };
+    const data = (await res.json()) as { success: boolean; url?: string; label?: string };
+    return { url: data.url || '', label: data.label || '' };
+  } catch {
+    return { url: '', label: '' };
+  }
+};
+
+export const setLibraryLink = (url: string, label: string) =>
+  postJson<ApiResult>('/api/admin/library-link', { url, label });
+
+// --- Storage quota (admin) ---
+
+export interface UserStorageUsage {
+  email: string;
+  usedBytes: number;
+  quotaBytes: number;
+  percentage: number;
+}
+
+export const getStorageUsage = async (): Promise<{ users: UserStorageUsage[]; quotaBytes: number } | null> => {
+  try {
+    const res = await fetch('/api/admin/storage', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { success: boolean; users?: UserStorageUsage[]; quotaBytes?: number };
+    if (!data.success) return null;
+    return { users: data.users || [], quotaBytes: data.quotaBytes || 0 };
+  } catch {
+    return null;
+  }
+};
+
+export const setStorageQuota = (quotaGB: number) => postJson<ApiResult>('/api/admin/storage', { quotaGB });
+
 // --- Session ---
 
 export const logout = async (): Promise<void> => {

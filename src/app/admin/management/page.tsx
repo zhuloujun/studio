@@ -15,8 +15,13 @@ import {
   changePassword,
   requestAdminLoginUrlChangeOtp,
   changeAdminLoginUrl,
+  getLibraryLinkForAdmin,
+  setLibraryLink,
+  getStorageUsage,
+  setStorageQuota,
+  type UserStorageUsage,
 } from '@/lib/authService';
-import { Trash2, Users, KeyRound, AlertTriangle, Link as LinkIcon } from 'lucide-react';
+import { Trash2, Users, KeyRound, AlertTriangle, Link as LinkIcon, BookMarked, HardDrive } from 'lucide-react';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,6 +80,16 @@ function AdminManagementPage() {
   const [isSubmittingUrl, setIsSubmittingUrl] = useState(false);
   const urlCooldown = useCooldown();
 
+  // --- "文献库" quick-link ---
+  const [libraryLinkUrl, setLibraryLinkUrl] = useState('');
+  const [libraryLinkLabel, setLibraryLinkLabel] = useState('');
+  const [isSavingLibraryLink, setIsSavingLibraryLink] = useState(false);
+
+  // --- Storage quota ---
+  const [storageUsers, setStorageUsers] = useState<UserStorageUsage[]>([]);
+  const [quotaGBInput, setQuotaGBInput] = useState('5');
+  const [isSavingQuota, setIsSavingQuota] = useState(false);
+
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
   const commonDict = dictionary.common;
@@ -85,11 +100,55 @@ function AdminManagementPage() {
     const info = await getAdminLoginUrlInfo();
     if (info) setCurrentLoginPath(info.path);
   };
+  const refreshLibraryLink = async () => {
+    const { url, label } = await getLibraryLinkForAdmin();
+    setLibraryLinkUrl(url);
+    setLibraryLinkLabel(label);
+  };
+  const refreshStorageUsage = async () => {
+    const result = await getStorageUsage();
+    if (result) {
+      setStorageUsers(result.users);
+      setQuotaGBInput((result.quotaBytes / (1024 * 1024 * 1024)).toFixed(1));
+    }
+  };
 
   useEffect(() => {
     refreshUsers();
     refreshLoginUrl();
+    refreshLibraryLink();
+    refreshStorageUsage();
   }, []);
+
+  const handleSaveLibraryLink = async () => {
+    setIsSavingLibraryLink(true);
+    const result = await setLibraryLink(libraryLinkUrl.trim(), libraryLinkLabel.trim());
+    setIsSavingLibraryLink(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: '文献库跳转链接已更新。' });
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
+    }
+  };
+
+  const handleSaveQuota = async () => {
+    const quotaGB = parseFloat(quotaGBInput);
+    if (!Number.isFinite(quotaGB) || quotaGB <= 0) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入一个大于 0 的数字。' });
+      return;
+    }
+    setIsSavingQuota(true);
+    const result = await setStorageQuota(quotaGB);
+    setIsSavingQuota(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: '默认存储限额已更新。' });
+      refreshStorageUsage();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
+    }
+  };
+
+  const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}GB`;
 
   const performDelete = async () => {
     if (!userToDelete) return;
@@ -324,6 +383,87 @@ function AdminManagementPage() {
             <p className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
               <AlertTriangle className="h-4 w-4" /> 修改后请立刻把新地址记录在安全的地方，忘记地址不影响登录本身（可以联系开发者从数据库查询），但会不方便。
             </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><BookMarked />"文献库"跳转按钮</CardTitle>
+            <CardDescription>
+              配置后，普通用户在 library 页面"从学术文献库搜索"区域上方会看到一个按钮，点击后跳转到这里设置的地址（比如你自己机构的图书馆入口）。留空则不显示这个按钮。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <Label htmlFor="library-link-label">按钮文字</Label>
+            <Input
+              id="library-link-label"
+              value={libraryLinkLabel}
+              onChange={(e) => setLibraryLinkLabel(e.target.value)}
+              placeholder="例如：图书馆入口"
+            />
+            <Label htmlFor="library-link-url">跳转地址</Label>
+            <Input
+              id="library-link-url"
+              value={libraryLinkUrl}
+              onChange={(e) => setLibraryLinkUrl(e.target.value)}
+              placeholder="https://example.com"
+            />
+            <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink} className="mt-2">
+              {isSavingLibraryLink ? '保存中...' : '保存'}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><HardDrive />存储限额</CardTitle>
+            <CardDescription>
+              每个普通用户的文档+媒体文件总大小不能超过这个限额，防止个别账号占用过多存储导致资源紧张。所有用户共用同一个限额。
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-end gap-2">
+              <div className="flex-1 max-w-[200px]">
+                <Label htmlFor="quota-gb">默认限额（GB）</Label>
+                <Input
+                  id="quota-gb"
+                  type="number"
+                  min="0.1"
+                  step="0.5"
+                  value={quotaGBInput}
+                  onChange={(e) => setQuotaGBInput(e.target.value)}
+                />
+              </div>
+              <Button onClick={handleSaveQuota} disabled={isSavingQuota}>
+                {isSavingQuota ? '保存中...' : '保存'}
+              </Button>
+            </div>
+
+            <div>
+              <Label>各用户存储用量</Label>
+              {storageUsers.length > 0 ? (
+                <ul className="mt-2 space-y-2">
+                  {storageUsers.map((u) => (
+                    <li key={u.email} className="p-2 border rounded-md">
+                      <div className="flex items-center justify-between text-sm">
+                        <span>{u.email}</span>
+                        <span className="text-muted-foreground">
+                          {formatBytes(u.usedBytes)} / {formatBytes(u.quotaBytes)}（{u.percentage}%）
+                        </span>
+                      </div>
+                      <div className="w-full h-1.5 bg-muted rounded-full mt-1 overflow-hidden">
+                        <div
+                          className={u.percentage >= 90 ? 'h-full bg-destructive' : 'h-full bg-primary'}
+                          style={{ width: `${Math.min(100, u.percentage)}%` }}
+                        />
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-muted-foreground mt-2">暂无用户数据。</p>
+              )}
+            </div>
           </CardContent>
         </Card>
       </div>

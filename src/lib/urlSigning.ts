@@ -1,66 +1,60 @@
 // src/lib/urlSigning.ts
-// Server-only. Signs URLs returned by /api/external-search so
-// /api/external-search/proxy can safely fetch ANY domain a result happens
-// to point to (open-access papers/books are hosted all over the place -
-// publisher sites, institutional repositories, etc., not a fixed list of
-// domains) while still preventing the proxy from being used as an open
-// SSRF relay: it will only fetch a URL that was itself issued by our own
-// search endpoint moments ago, verified via HMAC signature + short expiry.
-import { getSetting, setSetting } from './adminSettings';
+// Server-only. Turns URLs returned by /api/external-search into short,
+// opaque tokens that /api/external-search/proxy will accept, so the proxy
+// can safely fetch ANY domain a result happens to point to (open-access
+// papers/books are hosted all over the place - publisher sites,
+// institutional repositories, etc., not a fixed list of domains) without
+// being usable as an open SSRF relay for arbitrary URLs.
+//
+// This used to embed the URL itself (percent-encoded) plus an expiry and an
+// HMAC signature directly in the token string. That worked for short URLs,
+// but some sources (DOAJ especially, since full-text links there point to
+// whatever journal platform hosts the article, often with long tracking/
+// session query strings) produce very long URLs. The resulting token, once
+// percent-encoded AGAIN to go in our own proxy's query string, could get
+// long enough to be mangled somewhere in the pipeline - which surfaced as
+// "this link has expired" (signature verification failing) for every
+// single DOAJ result, even ones opened seconds after searching.
+//
+// Storing the mapping in D1 instead and handing back a short random token
+// sidesteps the whole problem: the token's length never depends on the
+// underlying URL's length.
+import { getEnv } from './cloudflare';
 
-const SIGNING_SECRET_KEY = 'external_url_signing_secret';
-const TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours - generous enough that a cached search result (see localStorage caching in the library page) is still openable well after the search, without making an SSRF-relay abuse window unreasonably long.
+const TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
-async function getSigningSecret(): Promise<string> {
-  let secret = await getSetting(SIGNING_SECRET_KEY);
-  if (!secret) {
-    secret = crypto.randomUUID() + crypto.randomUUID();
-    await setSetting(SIGNING_SECRET_KEY, secret);
-  }
-  return secret;
-}
-
-async function hmacHex(data: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, [
-    'sign',
-  ]);
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
-  return Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-/** Wraps a real URL into an opaque, time-limited signed token. */
+/** Stores a URL and returns a short, opaque token that resolves back to it (see verifySignedUrl) until it expires. */
 export async function signUrl(url: string): Promise<string> {
-  const secret = await getSigningSecret();
-  const expiry = Date.now() + TOKEN_TTL_MS;
-  const payload = `${url}|${expiry}`;
-  const sig = await hmacHex(payload, secret);
-  return `${encodeURIComponent(url)}.${expiry}.${sig}`;
+  const env = getEnv();
+  const token = crypto.randomUUID();
+  const expiresAt = Date.now() + TOKEN_TTL_MS;
+  await env.DB.prepare(`INSERT INTO signed_urls (token, url, expires_at) VALUES (?1, ?2, ?3)`)
+    .bind(token, url, expiresAt)
+    .run();
+
+  // Lightweight, occasional cleanup so this table doesn't grow forever -
+  // no need to run it on every call, just often enough to keep it tidy.
+  if (Math.random() < 0.02) {
+    env.DB.prepare(`DELETE FROM signed_urls WHERE expires_at < ?1`).bind(Date.now()).run().catch(() => {});
+  }
+
+  return token;
 }
 
-/** Returns the original URL if the token is validly signed and not expired, else null. */
+/** Returns the original URL if the token is valid and not expired, else null. */
 export async function verifySignedUrl(token: string): Promise<string | null> {
-  const lastDot = token.lastIndexOf('.');
-  const secondLastDot = token.lastIndexOf('.', lastDot - 1);
-  if (lastDot < 0 || secondLastDot < 0) return null;
+  const env = getEnv();
+  const row = await env.DB.prepare(`SELECT url, expires_at FROM signed_urls WHERE token = ?1`)
+    .bind(token)
+    .first<{ url: string; expires_at: number }>();
 
-  const encodedUrl = token.slice(0, secondLastDot);
-  const expiryStr = token.slice(secondLastDot + 1, lastDot);
-  const sig = token.slice(lastDot + 1);
-  const expiry = parseInt(expiryStr, 10);
-  if (!expiry || Number.isNaN(expiry) || Date.now() > expiry) return null;
-
-  let url: string;
-  try {
-    url = decodeURIComponent(encodedUrl);
-  } catch {
+  if (!row) return null;
+  if (Date.now() > row.expires_at) {
+    // Opportunistic cleanup of this one expired row; a broader periodic
+    // sweep isn't necessary since D1 storage for this table stays tiny
+    // (rows are only ever a token + a URL string).
+    await env.DB.prepare(`DELETE FROM signed_urls WHERE token = ?1`).bind(token).run();
     return null;
   }
-
-  const secret = await getSigningSecret();
-  const expectedSig = await hmacHex(`${url}|${expiry}`, secret);
-  if (expectedSig !== sig) return null;
-
-  return url;
+  return row.url;
 }

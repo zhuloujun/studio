@@ -586,7 +586,20 @@ export async function GET(req: NextRequest) {
       )
     );
 
-    const rawResults = rawResultLists.flat();
+    // Interleave results round-robin across sources instead of
+    // concatenating each source's block one after another - otherwise
+    // whichever source happens to be listed last in ENABLED_SOURCES always
+    // ends up at the bottom of every single results list, regardless of how
+    // relevant its matches actually are (there's no single relevance score
+    // comparable across totally different search engines, so round-robin is
+    // the fairest simple approximation).
+    const rawResults: RawResult[] = [];
+    const maxLen = Math.max(0, ...rawResultLists.map((list) => list.length));
+    for (let i = 0; i < maxLen; i++) {
+      for (const list of rawResultLists) {
+        if (list[i]) rawResults.push(list[i]);
+      }
+    }
     const CATEGORY_BY_SOURCE: Record<ExternalSearchResult['source'], ExternalSearchResult['category']> = {
       arxiv: 'academic',
       semanticscholar: 'academic',

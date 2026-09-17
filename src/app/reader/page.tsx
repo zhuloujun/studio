@@ -106,6 +106,15 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [currentPdfPageNum, setCurrentPdfPageNum] = useState(1);
   const [pdfTotalPages, setPdfTotalPages] = useState(0);
   const [pdfPageImage, setPdfPageImage] = useState<string | null>(null);
+  // Continuous-scroll PDF viewing: renders every page up front into this
+  // array and displays them stacked in one scrollable column, instead of
+  // the single-page-at-a-time view. TTS/OCR text tracking (which the normal
+  // per-page view handles) isn't wired up for this mode - it's a pure
+  // reading view for people who'd rather scroll through the whole document
+  // than click next/prev for every page.
+  const [isContinuousScroll, setIsContinuousScroll] = useState(false);
+  const [continuousPageImages, setContinuousPageImages] = useState<(string | null)[]>([]);
+  const [isRenderingContinuous, setIsRenderingContinuous] = useState(false);
   const [isRenderingPdfPage, setIsRenderingPdfPage] = useState(false);
   const [pdfPageIsTextBased, setPdfPageIsTextBased] = useState(true);
   const [isPdfTextView, setIsPdfTextView] = useState(false);
@@ -795,6 +804,8 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     setMobiSpine([]);
     setMobiCurrentIndex(0);
     setDocxHtmlContent("");
+    setIsContinuousScroll(false);
+    setContinuousPageImages([]);
     setDisplayedImageSrc(null);
     setIsEpubLoading(false);
     setCurrentTextForTTS("");
@@ -900,6 +911,47 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     renderPage();
     return () => { isStale = true; };
   }, [pdfDocProxy, currentPdfPageNum, activeDoc, isPdfTextView, stopSpeech, readerDict.loadingContent, readerDict.ocrPage]);
+
+  // Renders every page up front for continuous-scroll mode. Only runs while
+  // that mode is actually on, and bails out cleanly if the user switches
+  // pages/documents/back to paged mode mid-render.
+  useEffect(() => {
+    if (!isContinuousScroll || activeDoc?.type !== 'pdf' || isPdfTextView || !pdfDocProxy || pdfTotalPages < 1) return;
+
+    let isStale = false;
+    const renderAll = async () => {
+      setIsRenderingContinuous(true);
+      setContinuousPageImages(new Array(pdfTotalPages).fill(null));
+      const renderScale = 1.5; // a bit lower than the single-page view's 2.0 - rendering every page at once is heavier
+      for (let pageNum = 1; pageNum <= pdfTotalPages; pageNum++) {
+        if (isStale) return;
+        try {
+          const page: PDFPageProxy = await pdfDocProxy.getPage(pageNum);
+          if (isStale) { page.cleanup(); return; }
+          const viewport = page.getViewport({ scale: renderScale });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+          if (context) await page.render({ canvasContext: context, viewport }).promise;
+          if (isStale) { page.cleanup(); return; }
+          const dataUrl = canvas.toDataURL('image/png');
+          setContinuousPageImages((prev) => {
+            const next = [...prev];
+            next[pageNum - 1] = dataUrl;
+            return next;
+          });
+          page.cleanup();
+        } catch (e) {
+          console.error(`Error rendering page ${pageNum} for continuous scroll:`, e);
+        }
+      }
+      if (!isStale) setIsRenderingContinuous(false);
+    };
+
+    renderAll();
+    return () => { isStale = true; };
+  }, [isContinuousScroll, pdfDocProxy, activeDoc, isPdfTextView, pdfTotalPages]);
 
 
   const handlePerformOcr = useCallback(async () => {
@@ -1873,6 +1925,29 @@ HighlightableContent.displayName = 'HighlightableContent';
         );
     }
 
+    if (activeDoc?.type === 'pdf' && !isPdfTextView && isContinuousScroll) {
+        return (
+            <div className="w-full h-full overflow-y-auto flex flex-col items-center gap-2 p-2 bg-muted/30">
+                {isRenderingContinuous && continuousPageImages.every((img) => !img) && (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
+                        <Loader2 className="h-4 w-4 animate-spin" /> 正在准备连续滚动视图...
+                    </div>
+                )}
+                {continuousPageImages.map((img, index) => (
+                    <div key={index} className="w-full max-w-3xl bg-background shadow-sm" style={{ transform: `scale(${viewScale})`, transformOrigin: 'top center' }}>
+                        {img ? (
+                            <img src={img} alt={`Page ${index + 1}`} className="w-full h-auto block" />
+                        ) : (
+                            <div className="w-full aspect-[1/1.4] flex items-center justify-center text-xs text-muted-foreground border">
+                                {readerDict.loadingContent} {index + 1}...
+                            </div>
+                        )}
+                    </div>
+                ))}
+            </div>
+        );
+    }
+
     if (activeDoc?.type === 'pdf' && !isPdfTextView) {
         return (
             <div className="w-full h-full relative"
@@ -2015,7 +2090,7 @@ HighlightableContent.displayName = 'HighlightableContent';
 
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, docxHtmlContent, viewScale]);
+  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, docxHtmlContent, viewScale, isContinuousScroll, continuousPageImages, isRenderingContinuous]);
 
   if (showInitialLoader) { 
     return <div className="flex items-center justify-center h-full flex-grow"><Loader2 className="h-12 w-12 animate-spin text-primary" /><p className="ml-4 text-lg">{readerDict.loadingDocument}</p></div>; 
@@ -2340,7 +2415,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                                 </>
                             )}
                             {activeDoc?.type === 'pdf' && (
-                                <div className="pt-2">
+                                <div className="pt-2 space-y-2">
                                     <Button 
                                     variant="outline" 
                                     size="sm"
@@ -2353,6 +2428,20 @@ HighlightableContent.displayName = 'HighlightableContent';
                                     >
                                     {isPdfTextView ? readerDict.switchToImageView : readerDict.switchToTextView}
                                     </Button>
+                                    {!isPdfTextView && (
+                                        <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="w-full"
+                                        onClick={() => {
+                                            stopSpeech(true);
+                                            setIsContinuousScroll(prev => !prev);
+                                        }}
+                                        disabled={isLoadingDoc || !pdfDocProxy}
+                                        >
+                                        {isContinuousScroll ? '切换到单页翻阅' : '切换到连续滚动阅读'}
+                                        </Button>
+                                    )}
                                 </div>
                             )}
                         </div>

@@ -46,6 +46,16 @@ function truncateTitle(title: string, maxWords: number = 4): string {
 }
 
 
+const TYPE_TO_EXTENSION: Record<string, string> = {
+  pdf: 'pdf',
+  epub: 'epub',
+  mobi: 'mobi',
+  txt: 'txt',
+  docx: 'docx',
+  image: '',
+  scratchpad: 'txt',
+};
+
 function externalSourceLabel(source: ExternalSearchResult['source']): string {
   switch (source) {
     case 'arxiv': return 'arXiv';
@@ -300,25 +310,28 @@ function LibraryPageContent() {
   };
 
   const handleSaveToDevice = async (doc: StoredMangaDocument) => {
-    if (!doc.fileData || !doc.title || !doc.originalType) {
+    if (!doc.title) {
         toast({variant: "destructive", title: commonDict.error, description: libraryDict.saveErrorIncomplete});
         return;
     }
     setIsSavingToDevice(doc.id);
 
     try {
-      const blob = arrayBufferToBlob(doc.fileData, doc.originalType);
-      
-      const url = URL.createObjectURL(blob);
+      // Goes through the same streaming download endpoint the reader uses
+      // to open documents, with Content-Disposition set to force a real
+      // download - this works for any file size (no need to hold the whole
+      // file in browser memory as a Blob first, which the old
+      // fileData-in-memory approach required and which isn't guaranteed to
+      // be populated since the document list itself only carries metadata).
+      const ext = TYPE_TO_EXTENSION[doc.type] || '';
+      const filename = doc.title.toLowerCase().endsWith(`.${ext}`) ? doc.title : `${doc.title}${ext ? `.${ext}` : ''}`;
       const a = document.createElement('a');
-      a.href = url;
-      a.download = doc.title;
+      a.href = `/api/documents/${encodeURIComponent(doc.id)}/file?download=${encodeURIComponent(filename)}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
       toast({ title: libraryDict.downloadStarted, description: libraryDict.downloadStartedMessage.replace('{title}', doc.title) });
-      
+
     } catch (error: any) {
       toast({ variant: "destructive", title: commonDict.error, description: libraryDict.saveToDeviceFailed.replace('{title}', doc.title).replace('{message}', error.message) });
     } finally {

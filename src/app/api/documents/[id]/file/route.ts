@@ -64,6 +64,10 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     if (status === 206) {
       headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
     }
+    const downloadFilename = req.nextUrl.searchParams.get('download');
+    if (downloadFilename) {
+      headers.set('Content-Disposition', `attachment; filename="${downloadFilename.replace(/"/g, "'")}"`);
+    }
 
     return new NextResponse(obj.body as unknown as ReadableStream, { status, headers });
   } catch (err) {

@@ -51,6 +51,9 @@ export async function GET(req: NextRequest) {
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
         Accept: 'application/pdf,text/html,application/xhtml+xml,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+        // Some journal platforms check for a plausible Referer to distinguish
+        // "someone clicked through from a real page" from a bare script hit.
+        Referer: `${parsed.protocol}//${parsed.hostname}/`,
       },
       redirect: 'follow',
     });

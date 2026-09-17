@@ -112,7 +112,7 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   // per-page view handles) isn't wired up for this mode - it's a pure
   // reading view for people who'd rather scroll through the whole document
   // than click next/prev for every page.
-  const [isContinuousScroll, setIsContinuousScroll] = useState(false);
+  const [isContinuousScroll, setIsContinuousScroll] = useState(true);
   const [continuousPageImages, setContinuousPageImages] = useState<(string | null)[]>([]);
   const [isRenderingContinuous, setIsRenderingContinuous] = useState(false);
   const [isRenderingPdfPage, setIsRenderingPdfPage] = useState(false);
@@ -804,7 +804,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     setMobiSpine([]);
     setMobiCurrentIndex(0);
     setDocxHtmlContent("");
-    setIsContinuousScroll(false);
+    setIsContinuousScroll(true);
     setContinuousPageImages([]);
     setDisplayedImageSrc(null);
     setIsEpubLoading(false);

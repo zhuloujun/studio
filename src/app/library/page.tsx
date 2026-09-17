@@ -490,7 +490,7 @@ function LibraryPageContent() {
                             disabled={isSavingToDevice === doc.id || isUploading || isLoading}
                             title={libraryDict.saveToDevice}
                         >
-                            {isSavingToDevice === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                            {isSavingToDevice === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                         </Button>
                         <Button
                           size="icon"

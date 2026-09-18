@@ -207,6 +207,23 @@ export const setStorageQuota = (quotaGB: number) => postJson<ApiResult>('/api/ad
 export const backfillStorageUsage = () =>
   postJson<ApiResult & { updated?: number; missing?: number }>('/api/admin/storage/backfill');
 
+export const getMyStorageUsage = async (): Promise<{ usedBytes: number; quotaBytes: number; percentage: number } | null> => {
+  try {
+    const res = await fetch('/api/storage/usage', { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      success: boolean;
+      usedBytes?: number;
+      quotaBytes?: number;
+      percentage?: number;
+    };
+    if (!data.success) return null;
+    return { usedBytes: data.usedBytes || 0, quotaBytes: data.quotaBytes || 0, percentage: data.percentage || 0 };
+  } catch {
+    return null;
+  }
+};
+
 // --- Session ---
 
 export const logout = async (): Promise<void> => {

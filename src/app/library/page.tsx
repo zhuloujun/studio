@@ -9,9 +9,9 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
-import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star, Download } from 'lucide-react';
+import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star, Download, BookMarked, HardDrive } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
-import { getLibraryLink } from '@/lib/authService';
+import { getLibraryLink, getMyStorageUsage } from '@/lib/authService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
@@ -94,6 +94,7 @@ function LibraryPageContent() {
   const [savingExternalId, setSavingExternalId] = useState<string | null>(null);
   const [externalSearchError, setExternalSearchError] = useState('');
   const [libraryLink, setLibraryLink] = useState<{ url: string; label: string } | null>(null);
+  const [myStorageUsage, setMyStorageUsage] = useState<{ usedBytes: number; quotaBytes: number; percentage: number } | null>(null);
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -151,6 +152,7 @@ function LibraryPageContent() {
     }
 
     getLibraryLink().then(setLibraryLink);
+    getMyStorageUsage().then(setMyStorageUsage);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Empty dependency array ensures this runs only once on mount
@@ -188,6 +190,7 @@ function LibraryPageContent() {
       await IndexedDBService.saveDocument(savedDoc);
       toast({ title: '已收藏', description: `《${result.title}》已保存到你的书库。` });
       await fetchDocuments(true);
+      getMyStorageUsage().then(setMyStorageUsage);
     } catch (e: any) {
       toast({ variant: 'destructive', title: '收藏失败', description: e?.message || '保存文献失败。' });
     } finally {
@@ -281,6 +284,7 @@ function LibraryPageContent() {
         await IndexedDBService.saveDocument(newDocument);
         toast({ title: libraryDict.documentSaved, description: libraryDict.documentSavedMessage.replace('{title}', newDocument.title) });
         await fetchDocuments(true, "Post-upload document fetch");
+      getMyStorageUsage().then(setMyStorageUsage);
       }
     } catch (error: any) {
       toast({ variant: "destructive", title: libraryDict.uploadError, description: libraryDict.uploadErrorMessage.replace('{name}', file.name).replace('{message}', error.message) });
@@ -306,6 +310,7 @@ function LibraryPageContent() {
             await IndexedDBService.saveLastActiveDocId(null);
         }
         await fetchDocuments(true, "Data refresh after deletion");
+      getMyStorageUsage().then(setMyStorageUsage);
         toast({ title: commonDict.success, description: libraryDict.deletionSuccess.replace('{title}', docTitleToDelete) });
     } catch (error: any) {
         console.error("Deletion failed:", error);
@@ -383,9 +388,13 @@ function LibraryPageContent() {
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
               {libraryLink && (
-                <Button size="sm" variant="outline" asChild>
+                <Button
+                  size="sm"
+                  asChild
+                  className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white shadow-md border-0 font-semibold"
+                >
                   <a href={libraryLink.url} target="_blank" rel="noopener noreferrer">
-                    {libraryLink.label} <ExternalLink className="ml-1 h-3 w-3" />
+                    <BookMarked className="mr-1.5 h-4 w-4" /> {libraryLink.label} <ExternalLink className="ml-1.5 h-3 w-3" />
                   </a>
                 </Button>
               )}
@@ -465,6 +474,27 @@ function LibraryPageContent() {
             <CardDescription>
               {libraryDict.storedDocumentsDescription}
             </CardDescription>
+            {myStorageUsage && (
+              <div className="mt-2 max-w-sm">
+                <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                  <span className="flex items-center gap-1"><HardDrive className="h-3 w-3" />存储用量</span>
+                  <span>
+                    {(myStorageUsage.usedBytes / (1024 * 1024 * 1024)).toFixed(2)}GB / {(myStorageUsage.quotaBytes / (1024 * 1024 * 1024)).toFixed(1)}GB（{myStorageUsage.percentage}%）
+                  </span>
+                </div>
+                <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                  <div
+                    className={myStorageUsage.percentage >= 90 ? 'h-full bg-destructive' : 'h-full bg-primary'}
+                    style={{ width: `${Math.min(100, myStorageUsage.percentage)}%` }}
+                  />
+                </div>
+                {myStorageUsage.percentage >= 80 && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    存储空间快用完了，大文件可以考虑用"保存到本地设备"按钮存到自己电脑上，不占用这里的额度。
+                  </p>
+                )}
+              </div>
+            )}
             <Button variant="outline" size="sm" onClick={() => fetchDocuments(true, "Manual refresh of document list")} disabled={isLoading || isUploading} className="mt-2 w-fit">
               <RefreshCw className={`mr-2 h-4 w-4 ${isLoading && !isUploading ? 'animate-spin' : ''}`} />{libraryDict.refreshList}
             </Button>

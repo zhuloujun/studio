@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { getDefaultQuotaBytes, setDefaultQuotaBytes } from '@/lib/storageQuota';
+import { isVerificationTokenValid } from '@/lib/adminSettingsVerification';
 
 export async function GET(req: NextRequest) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
@@ -49,7 +50,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { quotaGB } = (await req.json()) as { quotaGB?: number };
+    const { quotaGB, verificationToken } = (await req.json()) as { quotaGB?: number; verificationToken?: string };
+    if (!(await isVerificationTokenValid(verificationToken))) {
+      return NextResponse.json({ success: false, message: '请先完成邮箱验证码验证，再修改设置。' }, { status: 403 });
+    }
     if (typeof quotaGB !== 'number' || !Number.isFinite(quotaGB) || quotaGB <= 0) {
       return NextResponse.json({ success: false, message: '请输入一个大于 0 的数字（单位 GB）。' }, { status: 400 });
     }

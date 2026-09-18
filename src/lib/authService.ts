@@ -183,8 +183,8 @@ export const getLibraryLinksForAdmin = async (): Promise<LibraryLink[]> => {
   }
 };
 
-export const setLibraryLinks = (links: LibraryLink[]) =>
-  postJson<ApiResult>('/api/admin/library-link', { links });
+export const setLibraryLinks = (links: LibraryLink[], verificationToken: string) =>
+  postJson<ApiResult>('/api/admin/library-link', { links, verificationToken });
 
 // --- Storage quota (admin) ---
 
@@ -207,7 +207,15 @@ export const getStorageUsage = async (): Promise<{ users: UserStorageUsage[]; qu
   }
 };
 
-export const setStorageQuota = (quotaGB: number) => postJson<ApiResult>('/api/admin/storage', { quotaGB });
+export const setStorageQuota = (quotaGB: number, verificationToken: string) =>
+  postJson<ApiResult>('/api/admin/storage', { quotaGB, verificationToken });
+
+// --- Unified admin-settings-change email verification ---
+
+export const requestAdminSettingsOtp = () => postJson<ApiResult>('/api/admin/settings-otp/request');
+
+export const verifyAdminSettingsOtp = (code: string) =>
+  postJson<ApiResult & { token?: string }>('/api/admin/settings-otp/verify', { code });
 
 export const backfillStorageUsage = () =>
   postJson<ApiResult & { updated?: number; missing?: number }>('/api/admin/storage/backfill');

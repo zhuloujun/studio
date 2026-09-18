@@ -7,7 +7,8 @@ export type OtpPurpose =
   | 'reset_password'
   | 'admin_login'
   | 'admin_reset_password'
-  | 'change_admin_login_url';
+  | 'change_admin_login_url'
+  | 'admin_settings_change';
 
 const SUBJECTS: Record<OtpPurpose, string> = {
   register: 'MangaTalk 注册验证码',
@@ -15,6 +16,7 @@ const SUBJECTS: Record<OtpPurpose, string> = {
   admin_login: 'MangaTalk 管理员登录验证码',
   admin_reset_password: 'MangaTalk 管理员找回密码验证码',
   change_admin_login_url: 'MangaTalk 修改管理员登录地址验证码',
+  admin_settings_change: 'MangaTalk 后台设置修改验证码',
 };
 
 const BODIES: Record<OtpPurpose, (code: string) => string> = {
@@ -23,6 +25,7 @@ const BODIES: Record<OtpPurpose, (code: string) => string> = {
   admin_login: (code) => `管理员登录验证码是 <b>${code}</b>，10 分钟内有效。如果这不是您本人的操作，请立即检查后台安全。`,
   admin_reset_password: (code) => `您正在找回管理员密码，验证码是 <b>${code}</b>，10 分钟内有效。如果这不是您本人的操作，请立即检查后台安全。`,
   change_admin_login_url: (code) => `您正在修改管理员后台登录地址，验证码是 <b>${code}</b>，10 分钟内有效。如果这不是您本人的操作，请立即检查后台安全。`,
+  admin_settings_change: (code) => `您正在修改后台设置（文献库链接、存储限额等），验证码是 <b>${code}</b>，10 分钟内有效。如果这不是您本人的操作，请立即检查后台安全。`,
 };
 
 export async function sendOtpEmail(email: string, code: string, purpose: OtpPurpose): Promise<void> {

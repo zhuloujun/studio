@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { getSetting, setSetting } from '@/lib/adminSettings';
+import { isVerificationTokenValid } from '@/lib/adminSettingsVerification';
 import type { LibraryLink } from '@/app/api/settings/library-link/route';
 
 export async function GET(req: NextRequest) {
@@ -30,7 +31,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { links } = (await req.json()) as { links?: LibraryLink[] };
+    const { links, verificationToken } = (await req.json()) as { links?: LibraryLink[]; verificationToken?: string };
+    if (!(await isVerificationTokenValid(verificationToken))) {
+      return NextResponse.json({ success: false, message: '请先完成邮箱验证码验证，再修改设置。' }, { status: 403 });
+    }
     if (!Array.isArray(links)) {
       return NextResponse.json({ success: false, message: '参数格式不正确。' }, { status: 400 });
     }

@@ -113,6 +113,7 @@ const EXTERNAL_SOURCE_PREFIXES = [
   'pmc-',
   'hcommons-',
   'archive-',
+  'doaj-',
 ];
 
 export function isEphemeralDocId(id: string): boolean {

@@ -15,6 +15,8 @@ import {
   changePassword,
   requestAdminLoginUrlChangeOtp,
   changeAdminLoginUrl,
+  requestAdminSettingsOtp,
+  verifyAdminSettingsOtp,
   getLibraryLinksForAdmin,
   setLibraryLinks,
   type LibraryLink,
@@ -82,6 +84,13 @@ function AdminManagementPage() {
   const [isSubmittingUrl, setIsSubmittingUrl] = useState(false);
   const urlCooldown = useCooldown();
 
+  // --- Unified admin-settings-change verification (gates "文献库" links and storage quota saves) ---
+  const settingsOtpCooldown = useCooldown();
+  const [settingsOtpCode, setSettingsOtpCode] = useState('');
+  const [isSendingSettingsOtp, setIsSendingSettingsOtp] = useState(false);
+  const [isVerifyingSettingsOtp, setIsVerifyingSettingsOtp] = useState(false);
+  const [settingsVerificationToken, setSettingsVerificationToken] = useState<string | null>(null);
+
   // --- "文献库" quick-links (multiple) ---
   const [libraryLinks, setLibraryLinksState] = useState<LibraryLink[]>([]);
   const [isSavingLibraryLink, setIsSavingLibraryLink] = useState(false);
@@ -128,9 +137,39 @@ function AdminManagementPage() {
   const handleRemoveLibraryLinkRow = (index: number) =>
     setLibraryLinksState((prev) => prev.filter((_, i) => i !== index));
 
+  const handleSendSettingsOtp = async () => {
+    setIsSendingSettingsOtp(true);
+    const result = await requestAdminSettingsOtp();
+    setIsSendingSettingsOtp(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: '验证码已发送，请查收邮箱。' });
+      settingsOtpCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '发送失败。' });
+    }
+  };
+
+  const handleVerifySettingsOtp = async () => {
+    if (!settingsOtpCode.trim()) return;
+    setIsVerifyingSettingsOtp(true);
+    const result = await verifyAdminSettingsOtp(settingsOtpCode.trim());
+    setIsVerifyingSettingsOtp(false);
+    if (result.success && result.token) {
+      setSettingsVerificationToken(result.token);
+      setSettingsOtpCode('');
+      toast({ title: commonDict.success, description: '验证通过，15 分钟内可以保存下方各项设置。' });
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '验证码不正确。' });
+    }
+  };
+
   const handleSaveLibraryLink = async () => {
+    if (!settingsVerificationToken) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请先完成邮箱验证码验证。' });
+      return;
+    }
     setIsSavingLibraryLink(true);
-    const result = await setLibraryLinks(libraryLinks);
+    const result = await setLibraryLinks(libraryLinks, settingsVerificationToken);
     setIsSavingLibraryLink(false);
     if (result.success) {
       toast({ title: commonDict.success, description: '文献库跳转链接已更新。' });
@@ -141,13 +180,17 @@ function AdminManagementPage() {
   };
 
   const handleSaveQuota = async () => {
+    if (!settingsVerificationToken) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请先完成邮箱验证码验证。' });
+      return;
+    }
     const quotaGB = parseFloat(quotaGBInput);
     if (!Number.isFinite(quotaGB) || quotaGB <= 0) {
       toast({ variant: 'destructive', title: commonDict.error, description: '请输入一个大于 0 的数字。' });
       return;
     }
     setIsSavingQuota(true);
-    const result = await setStorageQuota(quotaGB);
+    const result = await setStorageQuota(quotaGB, settingsVerificationToken);
     setIsSavingQuota(false);
     if (result.success) {
       toast({ title: commonDict.success, description: '默认存储限额已更新。' });
@@ -276,6 +319,41 @@ function AdminManagementPage() {
     <>
       <div className="container mx-auto p-4 md:p-6 space-y-6">
         <h1 className="text-2xl font-bold">{adminDict.title}</h1>
+
+        <Card className={settingsVerificationToken ? 'border-green-500/50' : 'border-amber-500/50'}>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><KeyRound />设置修改验证</CardTitle>
+            <CardDescription>
+              为防止账号被盗后台被篡改，下方"文献库导航"和"存储限额"这两项设置的保存按钮，都需要先在这里完成邮箱验证码验证才能使用（验证一次，15 分钟内有效，可以保存多次）。
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {settingsVerificationToken ? (
+              <p className="text-sm text-green-600 flex items-center gap-1.5">
+                <KeyRound className="h-4 w-4" /> 已验证，15 分钟内可以保存下方设置。
+              </p>
+            ) : (
+              <div className="flex flex-wrap items-end gap-2">
+                <Button onClick={handleSendSettingsOtp} disabled={isSendingSettingsOtp || settingsOtpCooldown.cooldown > 0} variant="outline">
+                  {settingsOtpCooldown.cooldown > 0 ? `${settingsOtpCooldown.cooldown}秒后可重发` : isSendingSettingsOtp ? '发送中...' : '发送邮箱验证码'}
+                </Button>
+                <div>
+                  <Label htmlFor="settings-otp-code">验证码</Label>
+                  <Input
+                    id="settings-otp-code"
+                    value={settingsOtpCode}
+                    onChange={(e) => setSettingsOtpCode(e.target.value)}
+                    placeholder="6 位数字"
+                    className="w-32"
+                  />
+                </div>
+                <Button onClick={handleVerifySettingsOtp} disabled={isVerifyingSettingsOtp || !settingsOtpCode.trim()}>
+                  {isVerifyingSettingsOtp ? '验证中...' : '验证'}
+                </Button>
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
@@ -450,7 +528,7 @@ function AdminManagementPage() {
               <Button variant="outline" size="sm" onClick={handleAddLibraryLinkRow}>
                 + 添加一个链接
               </Button>
-              <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink}>
+              <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink || !settingsVerificationToken}>
                 {isSavingLibraryLink ? '保存中...' : '保存全部'}
               </Button>
             </div>
@@ -477,7 +555,7 @@ function AdminManagementPage() {
                   onChange={(e) => setQuotaGBInput(e.target.value)}
                 />
               </div>
-              <Button onClick={handleSaveQuota} disabled={isSavingQuota}>
+              <Button onClick={handleSaveQuota} disabled={isSavingQuota || !settingsVerificationToken}>
                 {isSavingQuota ? '保存中...' : '保存'}
               </Button>
             </div>

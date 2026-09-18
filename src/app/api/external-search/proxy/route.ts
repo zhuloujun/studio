@@ -71,7 +71,7 @@ export async function GET(req: NextRequest) {
     // instance in a bad state for a moment afterwards, making unrelated
     // requests fail too). A plain download doesn't get parsed by anything
     // on our side, so it gets a much more generous ceiling.
-    const MAX_BYTES = downloadFilename ? 250 * 1024 * 1024 : 40 * 1024 * 1024;
+    const MAX_BYTES = downloadFilename ? 500 * 1024 * 1024 : 40 * 1024 * 1024;
     const declaredLength = upstream.headers.get('content-length');
     if (declaredLength && parseInt(declaredLength, 10) > MAX_BYTES) {
       return new NextResponse('File too large', { status: 413 });

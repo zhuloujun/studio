@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { getSetting, setSetting } from '@/lib/adminSettings';
-import { isVerificationTokenValid } from '@/lib/adminSettingsVerification';
+import { verifyOtp } from '@/lib/otpService';
 import type { LibraryLink } from '@/app/api/settings/library-link/route';
 
 export async function GET(req: NextRequest) {
@@ -31,9 +31,13 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { links, verificationToken } = (await req.json()) as { links?: LibraryLink[]; verificationToken?: string };
-    if (!(await isVerificationTokenValid(verificationToken))) {
-      return NextResponse.json({ success: false, message: '请先完成邮箱验证码验证，再修改设置。' }, { status: 403 });
+    const { links, code } = (await req.json()) as { links?: LibraryLink[]; code?: string };
+    if (typeof code !== 'string') {
+      return NextResponse.json({ success: false, message: '请输入验证码。' }, { status: 400 });
+    }
+    const otpResult = await verifyOtp(session.email, 'admin_settings_change', code);
+    if (!otpResult.valid) {
+      return NextResponse.json({ success: false, message: otpResult.reason }, { status: 400 });
     }
     if (!Array.isArray(links)) {
       return NextResponse.json({ success: false, message: '参数格式不正确。' }, { status: 400 });

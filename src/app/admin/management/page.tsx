@@ -10,16 +10,19 @@ import { AdminAuthGuard } from '@/components/auth/AuthGuard';
 import {
   getAllUsersForAdmin,
   deleteUserByAdmin,
+  requestDeleteUserOtp,
   getAdminLoginUrlInfo,
-  changeAdminPasswordWithToken,
+  requestPasswordChangeOtp,
+  changePassword,
+  requestAdminLoginUrlChangeOtp,
   changeAdminLoginUrl,
-  requestAdminSettingsOtp,
-  verifyAdminSettingsOtp,
   getLibraryLinksForAdmin,
   setLibraryLinks,
+  requestLibraryLinksOtp,
   type LibraryLink,
   getStorageUsage,
   setStorageQuota,
+  requestStorageQuotaOtp,
   backfillStorageUsage,
   type UserStorageUsage,
 } from '@/lib/authService';
@@ -64,32 +67,48 @@ function AdminManagementPage() {
   const [users, setUsers] = useState<{ email: string }[]>([]);
   const [userToDelete, setUserToDelete] = useState<{email: string} | null>(null);
 
+  // --- Delete user (own independent OTP flow) ---
+  const [deleteOtpCode, setDeleteOtpCode] = useState('');
+  const [deleteOtpRequested, setDeleteOtpRequested] = useState(false);
+  const [isSendingDeleteOtp, setIsSendingDeleteOtp] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const deleteCooldown = useCooldown();
+
   // --- Change admin password ---
   const [newAdminPassword, setNewAdminPassword] = useState('');
   const [confirmAdminPassword, setConfirmAdminPassword] = useState('');
+  const [pwOtpCode, setPwOtpCode] = useState('');
+  const [pwOtpRequested, setPwOtpRequested] = useState(false);
+  const [isSendingPwOtp, setIsSendingPwOtp] = useState(false);
   const [isSubmittingPw, setIsSubmittingPw] = useState(false);
+  const pwCooldown = useCooldown();
 
   // --- Change admin login URL ---
   const [currentLoginPath, setCurrentLoginPath] = useState('');
   const [newSlug, setNewSlug] = useState('');
+  const [urlOtpCode, setUrlOtpCode] = useState('');
+  const [urlOtpRequested, setUrlOtpRequested] = useState(false);
+  const [isSendingUrlOtp, setIsSendingUrlOtp] = useState(false);
   const [isSubmittingUrl, setIsSubmittingUrl] = useState(false);
+  const urlCooldown = useCooldown();
 
-  // --- Unified admin-settings-change verification (gates every admin write action: password, login URL, "文献库" links, storage quota, user deletion) ---
-  const settingsOtpCooldown = useCooldown();
-  const [settingsOtpCode, setSettingsOtpCode] = useState('');
-  const [isSendingSettingsOtp, setIsSendingSettingsOtp] = useState(false);
-  const [isVerifyingSettingsOtp, setIsVerifyingSettingsOtp] = useState(false);
-  const [settingsVerificationToken, setSettingsVerificationToken] = useState<string | null>(null);
-
-  // --- "文献库" quick-links (multiple) ---
+  // --- "文献库" quick-links (own independent OTP flow) ---
   const [libraryLinks, setLibraryLinksState] = useState<LibraryLink[]>([]);
+  const [libraryOtpCode, setLibraryOtpCode] = useState('');
+  const [libraryOtpRequested, setLibraryOtpRequested] = useState(false);
+  const [isSendingLibraryOtp, setIsSendingLibraryOtp] = useState(false);
   const [isSavingLibraryLink, setIsSavingLibraryLink] = useState(false);
+  const libraryCooldown = useCooldown();
 
-  // --- Storage quota ---
+  // --- Storage quota (own independent OTP flow) ---
   const [storageUsers, setStorageUsers] = useState<UserStorageUsage[]>([]);
   const [quotaGBInput, setQuotaGBInput] = useState('5');
+  const [quotaOtpCode, setQuotaOtpCode] = useState('');
+  const [quotaOtpRequested, setQuotaOtpRequested] = useState(false);
+  const [isSendingQuotaOtp, setIsSendingQuotaOtp] = useState(false);
   const [isSavingQuota, setIsSavingQuota] = useState(false);
   const [isBackfilling, setIsBackfilling] = useState(false);
+  const quotaCooldown = useCooldown();
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -127,71 +146,6 @@ function AdminManagementPage() {
   const handleRemoveLibraryLinkRow = (index: number) =>
     setLibraryLinksState((prev) => prev.filter((_, i) => i !== index));
 
-  const handleSendSettingsOtp = async () => {
-    setIsSendingSettingsOtp(true);
-    const result = await requestAdminSettingsOtp();
-    setIsSendingSettingsOtp(false);
-    if (result.success) {
-      toast({ title: commonDict.success, description: '验证码已发送，请查收邮箱。' });
-      settingsOtpCooldown.start();
-    } else {
-      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '发送失败。' });
-    }
-  };
-
-  const handleVerifySettingsOtp = async () => {
-    if (!settingsOtpCode.trim()) return;
-    setIsVerifyingSettingsOtp(true);
-    const result = await verifyAdminSettingsOtp(settingsOtpCode.trim());
-    setIsVerifyingSettingsOtp(false);
-    if (result.success && result.token) {
-      setSettingsVerificationToken(result.token);
-      setSettingsOtpCode('');
-      toast({ title: commonDict.success, description: '验证通过，15 分钟内可以保存下方各项设置。' });
-    } else {
-      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '验证码不正确。' });
-    }
-  };
-
-  const handleSaveLibraryLink = async () => {
-    if (!settingsVerificationToken) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请先完成邮箱验证码验证。' });
-      return;
-    }
-    setIsSavingLibraryLink(true);
-    const result = await setLibraryLinks(libraryLinks, settingsVerificationToken);
-    setIsSavingLibraryLink(false);
-    if (result.success) {
-      toast({ title: commonDict.success, description: '文献库跳转链接已更新。' });
-      refreshLibraryLinks();
-    } else {
-      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
-    }
-  };
-
-  const handleSaveQuota = async () => {
-    if (!settingsVerificationToken) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请先完成邮箱验证码验证。' });
-      return;
-    }
-    const quotaGB = parseFloat(quotaGBInput);
-    if (!Number.isFinite(quotaGB) || quotaGB <= 0) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请输入一个大于 0 的数字。' });
-      return;
-    }
-    setIsSavingQuota(true);
-    const result = await setStorageQuota(quotaGB, settingsVerificationToken);
-    setIsSavingQuota(false);
-    if (result.success) {
-      toast({ title: commonDict.success, description: '默认存储限额已更新。' });
-      refreshStorageUsage();
-    } else {
-      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
-    }
-  };
-
-  const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}GB`;
-
   const handleBackfillStorage = async () => {
     setIsBackfilling(true);
     const result = await backfillStorageUsage();
@@ -204,19 +158,36 @@ function AdminManagementPage() {
     }
   };
 
+  // --- Delete user handlers ---
+  const handleRequestDeleteOtp = async () => {
+    setIsSendingDeleteOtp(true);
+    const result = await requestDeleteUserOtp();
+    setIsSendingDeleteOtp(false);
+    if (result.success) {
+      toast({ title: '验证码已发送', description: '请查收管理员邮箱中的 6 位验证码。' });
+      setDeleteOtpRequested(true);
+      deleteCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message });
+    }
+  };
+
   const performDelete = async () => {
     if (!userToDelete) return;
-    if (!settingsVerificationToken) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请先在上方完成邮箱验证码验证。' });
-      setUserToDelete(null);
+    if (deleteOtpCode.length !== 6) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入 6 位验证码。' });
       return;
     }
-
-    const result = await deleteUserByAdmin(userToDelete.email, settingsVerificationToken);
+    setIsDeleting(true);
+    const result = await deleteUserByAdmin(userToDelete.email, deleteOtpCode);
+    setIsDeleting(false);
 
     if (result.success) {
       toast({ title: adminDict.userDeleted, description: adminDict.userDeletedMessage.replace('{email}', userToDelete.email) });
       await refreshUsers();
+      setUserToDelete(null);
+      setDeleteOtpCode('');
+      setDeleteOtpRequested(false);
     } else {
       toast({
         variant: 'destructive',
@@ -224,15 +195,10 @@ function AdminManagementPage() {
         description: result.message || 'An unknown error occurred.'
       });
     }
-    setUserToDelete(null);
   };
 
-  // --- Password change handler (uses the unified verification token) ---
-  const handlePasswordChange = async () => {
-    if (!settingsVerificationToken) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请先在上方完成邮箱验证码验证。' });
-      return;
-    }
+  // --- Password change handlers ---
+  const handleRequestPwOtp = async () => {
     if (newAdminPassword.length < 4) {
       toast({ variant: 'destructive', title: commonDict.error, description: dictionary.register.passwordLengthError });
       return;
@@ -241,87 +207,160 @@ function AdminManagementPage() {
       toast({ variant: 'destructive', title: commonDict.error, description: '两次输入的密码不一致。' });
       return;
     }
+    setIsSendingPwOtp(true);
+    const result = await requestPasswordChangeOtp();
+    setIsSendingPwOtp(false);
+
+    if (result.success) {
+      toast({ title: '验证码已发送', description: '请查收管理员邮箱中的 6 位验证码。' });
+      setPwOtpRequested(true);
+      pwCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message });
+    }
+  };
+
+  const handlePasswordChange = async () => {
+    if (pwOtpCode.length !== 6) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入 6 位验证码。' });
+      return;
+    }
     setIsSubmittingPw(true);
-    const result = await changeAdminPasswordWithToken(newAdminPassword, settingsVerificationToken);
+    const result = await changePassword(pwOtpCode, newAdminPassword);
     setIsSubmittingPw(false);
 
     if (result.success) {
       toast({ title: commonDict.success, description: adminDict.adminPasswordUpdated });
       setNewAdminPassword('');
       setConfirmAdminPassword('');
+      setPwOtpCode('');
+      setPwOtpRequested(false);
     } else {
       toast({ variant: 'destructive', title: commonDict.error, description: result.message || adminDict.failedToUpdateAdminPassword });
     }
   };
 
-  // --- Login URL change handler (uses the unified verification token) ---
-  const handleUrlChange = async () => {
-    if (!settingsVerificationToken) {
-      toast({ variant: 'destructive', title: commonDict.error, description: '请先在上方完成邮箱验证码验证。' });
-      return;
-    }
+  // --- Login URL change handlers ---
+  const handleRequestUrlOtp = async () => {
     const trimmed = newSlug.trim();
     if (!/^[a-zA-Z0-9_-]{12,120}$/.test(trimmed)) {
       toast({ variant: 'destructive', title: commonDict.error, description: '登录地址只能包含字母、数字、下划线和短横线，长度需在 12-120 位之间。' });
       return;
     }
+    setIsSendingUrlOtp(true);
+    const result = await requestAdminLoginUrlChangeOtp();
+    setIsSendingUrlOtp(false);
+
+    if (result.success) {
+      toast({ title: '验证码已发送', description: '请查收管理员邮箱中的 6 位验证码。' });
+      setUrlOtpRequested(true);
+      urlCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message });
+    }
+  };
+
+  const handleUrlChange = async () => {
+    if (urlOtpCode.length !== 6) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入 6 位验证码。' });
+      return;
+    }
     setIsSubmittingUrl(true);
-    const result = await changeAdminLoginUrl(trimmed, settingsVerificationToken);
+    const result = await changeAdminLoginUrl(urlOtpCode, newSlug.trim());
     setIsSubmittingUrl(false);
 
     if (result.success) {
       toast({ title: commonDict.success, description: '登录地址已更新，请记好新的地址（旧地址将立即失效）。' });
       if (result.path) setCurrentLoginPath(result.path);
       setNewSlug('');
+      setUrlOtpCode('');
+      setUrlOtpRequested(false);
     } else {
       toast({ variant: 'destructive', title: commonDict.error, description: result.message || '修改登录地址失败。' });
     }
   };
+
+  // --- "文献库" links handlers ---
+  const handleRequestLibraryOtp = async () => {
+    setIsSendingLibraryOtp(true);
+    const result = await requestLibraryLinksOtp();
+    setIsSendingLibraryOtp(false);
+    if (result.success) {
+      toast({ title: '验证码已发送', description: '请查收管理员邮箱中的 6 位验证码。' });
+      setLibraryOtpRequested(true);
+      libraryCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message });
+    }
+  };
+
+  const handleSaveLibraryLink = async () => {
+    if (libraryOtpCode.length !== 6) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入 6 位验证码。' });
+      return;
+    }
+    setIsSavingLibraryLink(true);
+    const result = await setLibraryLinks(libraryLinks, libraryOtpCode);
+    setIsSavingLibraryLink(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: '文献库跳转链接已更新。' });
+      setLibraryOtpCode('');
+      setLibraryOtpRequested(false);
+      refreshLibraryLinks();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
+    }
+  };
+
+  // --- Storage quota handlers ---
+  const handleRequestQuotaOtp = async () => {
+    const quotaGB = parseFloat(quotaGBInput);
+    if (!Number.isFinite(quotaGB) || quotaGB <= 0) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入一个大于 0 的数字。' });
+      return;
+    }
+    setIsSendingQuotaOtp(true);
+    const result = await requestStorageQuotaOtp();
+    setIsSendingQuotaOtp(false);
+    if (result.success) {
+      toast({ title: '验证码已发送', description: '请查收管理员邮箱中的 6 位验证码。' });
+      setQuotaOtpRequested(true);
+      quotaCooldown.start();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message });
+    }
+  };
+
+  const handleSaveQuota = async () => {
+    if (quotaOtpCode.length !== 6) {
+      toast({ variant: 'destructive', title: commonDict.error, description: '请输入 6 位验证码。' });
+      return;
+    }
+    const quotaGB = parseFloat(quotaGBInput);
+    setIsSavingQuota(true);
+    const result = await setStorageQuota(quotaGB, quotaOtpCode);
+    setIsSavingQuota(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: '默认存储限额已更新。' });
+      setQuotaOtpCode('');
+      setQuotaOtpRequested(false);
+      refreshStorageUsage();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
+    }
+  };
+
+  const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}GB`;
 
   return (
     <>
       <div className="container mx-auto p-4 md:p-6 space-y-6">
         <h1 className="text-2xl font-bold">{adminDict.title}</h1>
 
-        <Card className={settingsVerificationToken ? 'border-green-500/50' : 'border-amber-500/50'}>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2"><KeyRound />设置修改验证</CardTitle>
-            <CardDescription>
-              为防止账号被盗后台被篡改，这个页面里所有会修改数据的操作（修改管理员密码、修改登录地址、删除用户、文献库导航、存储限额，以及以后新增的模块）都统一走这一个验证——先在这里发送并验证一次邮箱验证码，15 分钟内可以保存/删除多次，不用每个模块单独发验证码。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {settingsVerificationToken ? (
-              <p className="text-sm text-green-600 flex items-center gap-1.5">
-                <KeyRound className="h-4 w-4" /> 已验证，15 分钟内可以保存下方设置。
-              </p>
-            ) : (
-              <div className="flex flex-wrap items-end gap-2">
-                <Button onClick={handleSendSettingsOtp} disabled={isSendingSettingsOtp || settingsOtpCooldown.cooldown > 0} variant="outline">
-                  {settingsOtpCooldown.cooldown > 0 ? `${settingsOtpCooldown.cooldown}秒后可重发` : isSendingSettingsOtp ? '发送中...' : '发送邮箱验证码'}
-                </Button>
-                <div>
-                  <Label htmlFor="settings-otp-code">验证码</Label>
-                  <Input
-                    id="settings-otp-code"
-                    value={settingsOtpCode}
-                    onChange={(e) => setSettingsOtpCode(e.target.value)}
-                    placeholder="6 位数字"
-                    className="w-32"
-                  />
-                </div>
-                <Button onClick={handleVerifySettingsOtp} disabled={isVerifyingSettingsOtp || !settingsOtpCode.trim()}>
-                  {isVerifyingSettingsOtp ? '验证中...' : '验证'}
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Users />{adminDict.userManagement}</CardTitle>
-            <CardDescription>{adminDict.userManagementDescription}</CardDescription>
+            <CardDescription>{adminDict.userManagementDescription}删除用户需要邮箱验证码。</CardDescription>
           </CardHeader>
           <CardContent>
             {users.length > 0 ? (
@@ -334,8 +373,6 @@ function AdminManagementPage() {
                         size="icon"
                         onClick={() => setUserToDelete(user)}
                         aria-label={`Delete user ${user.email}`}
-                        disabled={!settingsVerificationToken}
-                        title={!settingsVerificationToken ? '请先在上方完成邮箱验证码验证' : undefined}
                     >
                         <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
@@ -351,7 +388,7 @@ function AdminManagementPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><KeyRound />{adminDict.changeAdminPassword}</CardTitle>
-            <CardDescription>需要先在最上方"设置修改验证"完成邮箱验证码验证才能保存。</CardDescription>
+            <CardDescription>需要邮箱验证码才能修改。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             <Label htmlFor="admin-password">{commonDict.newPassword}</Label>
@@ -361,6 +398,7 @@ function AdminManagementPage() {
               value={newAdminPassword}
               onChange={e => setNewAdminPassword(e.target.value)}
               placeholder={adminDict.newAdminPasswordPlaceholder}
+              disabled={pwOtpRequested}
             />
             <Label htmlFor="admin-password-confirm">{commonDict.confirmNewPassword}</Label>
             <Input
@@ -369,17 +407,41 @@ function AdminManagementPage() {
               value={confirmAdminPassword}
               onChange={e => setConfirmAdminPassword(e.target.value)}
               placeholder={commonDict.confirmNewPassword}
+              disabled={pwOtpRequested}
             />
-            <Button onClick={handlePasswordChange} className="mt-2" disabled={isSubmittingPw || !settingsVerificationToken}>
-              {isSubmittingPw ? '提交中...' : adminDict.savePassword}
-            </Button>
+            {!pwOtpRequested ? (
+              <Button onClick={handleRequestPwOtp} className="mt-2" disabled={isSendingPwOtp}>
+                {isSendingPwOtp ? '发送中...' : '发送邮箱验证码'}
+              </Button>
+            ) : (
+              <div className="mt-2 space-y-2">
+                <Input
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6 位验证码"
+                  value={pwOtpCode}
+                  onChange={(e) => setPwOtpCode(e.target.value.replace(/\D/g, ''))}
+                />
+                <div className="flex gap-2">
+                  <Button onClick={handlePasswordChange} disabled={isSubmittingPw}>
+                    {isSubmittingPw ? '提交中...' : adminDict.savePassword}
+                  </Button>
+                  <Button variant="link" disabled={pwCooldown.cooldown > 0 || isSendingPwOtp} onClick={handleRequestPwOtp}>
+                    {pwCooldown.cooldown > 0 ? `重新发送 (${pwCooldown.cooldown}s)` : '重新发送'}
+                  </Button>
+                  <Button variant="ghost" onClick={() => { setPwOtpRequested(false); setPwOtpCode(''); }}>
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><LinkIcon />{adminDict.adminLoginURL}</CardTitle>
-            <CardDescription>需要先在最上方"设置修改验证"完成邮箱验证码验证才能保存。修改后旧地址会立即失效，请务必记好新地址再提交。</CardDescription>
+            <CardDescription>修改登录地址需要邮箱验证码。修改后旧地址会立即失效，请务必记好新地址再提交。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
             <Label>当前登录地址</Label>
@@ -391,10 +453,34 @@ function AdminManagementPage() {
               value={newSlug}
               onChange={(e) => setNewSlug(e.target.value)}
               placeholder="例如：my-secret-admin-entrance-2026"
+              disabled={urlOtpRequested}
             />
-            <Button onClick={handleUrlChange} className="mt-2" disabled={isSubmittingUrl || !settingsVerificationToken}>
-              {isSubmittingUrl ? '提交中...' : '确认修改'}
-            </Button>
+            {!urlOtpRequested ? (
+              <Button onClick={handleRequestUrlOtp} className="mt-2" disabled={isSendingUrlOtp}>
+                {isSendingUrlOtp ? '发送中...' : '发送邮箱验证码'}
+              </Button>
+            ) : (
+              <div className="mt-2 space-y-2">
+                <Input
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6 位验证码"
+                  value={urlOtpCode}
+                  onChange={(e) => setUrlOtpCode(e.target.value.replace(/\D/g, ''))}
+                />
+                <div className="flex gap-2">
+                  <Button onClick={handleUrlChange} disabled={isSubmittingUrl}>
+                    {isSubmittingUrl ? '提交中...' : '确认修改'}
+                  </Button>
+                  <Button variant="link" disabled={urlCooldown.cooldown > 0 || isSendingUrlOtp} onClick={handleRequestUrlOtp}>
+                    {urlCooldown.cooldown > 0 ? `重新发送 (${urlCooldown.cooldown}s)` : '重新发送'}
+                  </Button>
+                  <Button variant="ghost" onClick={() => { setUrlOtpRequested(false); setUrlOtpCode(''); }}>
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
             <p className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
               <AlertTriangle className="h-4 w-4" /> 修改后请立刻把新地址记录在安全的地方，忘记地址不影响登录本身（可以联系开发者从数据库查询），但会不方便。
             </p>
@@ -405,7 +491,7 @@ function AdminManagementPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><BookMarked />"文献库"导航模块</CardTitle>
             <CardDescription>
-              配置后，普通用户在 library 页面会看到一个独立的"文献库"导航区域，每一行对应一个跳转按钮（比如各个机构图书馆入口）。可以添加多个，全部留空则不显示这个模块。
+              配置后，普通用户在 library 页面会看到一个独立的"文献库"导航区域，每一行对应一个跳转按钮（比如各个机构图书馆入口）。可以添加多个，全部留空则不显示这个模块。保存需要邮箱验证码。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
@@ -434,7 +520,7 @@ function AdminManagementPage() {
                   size="icon"
                   onClick={() => handleRemoveLibraryLinkRow(index)}
                   disabled={libraryLinks.length <= 1}
-                  title="删除这一行"
+                  title="从这份编辑草稿里去掉这一行（点下方保存按钮、验证通过后才会真正生效）"
                 >
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -444,10 +530,34 @@ function AdminManagementPage() {
               <Button variant="outline" size="sm" onClick={handleAddLibraryLinkRow}>
                 + 添加一个链接
               </Button>
-              <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink || !settingsVerificationToken}>
-                {isSavingLibraryLink ? '保存中...' : '保存全部'}
-              </Button>
             </div>
+            {!libraryOtpRequested ? (
+              <Button onClick={handleRequestLibraryOtp} disabled={isSendingLibraryOtp}>
+                {isSendingLibraryOtp ? '发送中...' : '发送邮箱验证码'}
+              </Button>
+            ) : (
+              <div className="space-y-2">
+                <Input
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6 位验证码"
+                  value={libraryOtpCode}
+                  onChange={(e) => setLibraryOtpCode(e.target.value.replace(/\D/g, ''))}
+                  className="max-w-[200px]"
+                />
+                <div className="flex gap-2">
+                  <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink}>
+                    {isSavingLibraryLink ? '保存中...' : '保存全部'}
+                  </Button>
+                  <Button variant="link" disabled={libraryCooldown.cooldown > 0 || isSendingLibraryOtp} onClick={handleRequestLibraryOtp}>
+                    {libraryCooldown.cooldown > 0 ? `重新发送 (${libraryCooldown.cooldown}s)` : '重新发送'}
+                  </Button>
+                  <Button variant="ghost" onClick={() => { setLibraryOtpRequested(false); setLibraryOtpCode(''); }}>
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -455,7 +565,7 @@ function AdminManagementPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><HardDrive />存储限额</CardTitle>
             <CardDescription>
-              每个普通用户的文档+媒体文件总大小不能超过这个限额，防止个别账号占用过多存储导致资源紧张。所有用户共用同一个限额。
+              每个普通用户的文档+媒体文件总大小不能超过这个限额，防止个别账号占用过多存储导致资源紧张。所有用户共用同一个限额。修改限额需要邮箱验证码。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -469,12 +579,37 @@ function AdminManagementPage() {
                   step="0.5"
                   value={quotaGBInput}
                   onChange={(e) => setQuotaGBInput(e.target.value)}
+                  disabled={quotaOtpRequested}
                 />
               </div>
-              <Button onClick={handleSaveQuota} disabled={isSavingQuota || !settingsVerificationToken}>
-                {isSavingQuota ? '保存中...' : '保存'}
-              </Button>
+              {!quotaOtpRequested ? (
+                <Button onClick={handleRequestQuotaOtp} disabled={isSendingQuotaOtp}>
+                  {isSendingQuotaOtp ? '发送中...' : '发送邮箱验证码'}
+                </Button>
+              ) : null}
             </div>
+            {quotaOtpRequested && (
+              <div className="space-y-2 max-w-[300px]">
+                <Input
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6 位验证码"
+                  value={quotaOtpCode}
+                  onChange={(e) => setQuotaOtpCode(e.target.value.replace(/\D/g, ''))}
+                />
+                <div className="flex gap-2">
+                  <Button onClick={handleSaveQuota} disabled={isSavingQuota}>
+                    {isSavingQuota ? '保存中...' : '保存'}
+                  </Button>
+                  <Button variant="link" disabled={quotaCooldown.cooldown > 0 || isSendingQuotaOtp} onClick={handleRequestQuotaOtp}>
+                    {quotaCooldown.cooldown > 0 ? `重新发送 (${quotaCooldown.cooldown}s)` : '重新发送'}
+                  </Button>
+                  <Button variant="ghost" onClick={() => { setQuotaOtpRequested(false); setQuotaOtpCode(''); }}>
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
 
             <div>
               <div className="flex items-center justify-between">
@@ -510,17 +645,47 @@ function AdminManagementPage() {
         </Card>
       </div>
 
-      <AlertDialog open={!!userToDelete} onOpenChange={(isOpen) => !isOpen && setUserToDelete(null)}>
+      <AlertDialog
+        open={!!userToDelete}
+        onOpenChange={(isOpen) => {
+          if (!isOpen) {
+            setUserToDelete(null);
+            setDeleteOtpCode('');
+            setDeleteOtpRequested(false);
+          }
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{commonDict.areYouSure}</AlertDialogTitle>
             <AlertDialogDescription>
               {commonDict.actionCannotBeUndone} {adminDict.deleteUserConfirmation.replace('{email}', userToDelete?.email || '')}
+              需要先发送并输入邮箱验证码才能确认删除。
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {!deleteOtpRequested ? (
+            <Button onClick={handleRequestDeleteOtp} disabled={isSendingDeleteOtp}>
+              {isSendingDeleteOtp ? '发送中...' : '发送邮箱验证码'}
+            </Button>
+          ) : (
+            <div className="space-y-2">
+              <Input
+                inputMode="numeric"
+                maxLength={6}
+                placeholder="6 位验证码"
+                value={deleteOtpCode}
+                onChange={(e) => setDeleteOtpCode(e.target.value.replace(/\D/g, ''))}
+              />
+              <Button variant="link" disabled={deleteCooldown.cooldown > 0 || isSendingDeleteOtp} onClick={handleRequestDeleteOtp}>
+                {deleteCooldown.cooldown > 0 ? `重新发送 (${deleteCooldown.cooldown}s)` : '重新发送'}
+              </Button>
+            </div>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>{commonDict.cancel}</AlertDialogCancel>
-            <AlertDialogAction onClick={performDelete}>{commonDict.continue}</AlertDialogAction>
+            <AlertDialogAction onClick={performDelete} disabled={!deleteOtpRequested || isDeleting}>
+              {isDeleting ? '删除中...' : commonDict.continue}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

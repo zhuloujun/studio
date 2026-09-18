@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { normalizeEmail } from '@/lib/otpService';
+import { verifyOtp } from '@/lib/otpService';
 import { deletePrefix } from '@/lib/r2Storage';
-import { isVerificationTokenValid } from '@/lib/adminSettingsVerification';
 
 export async function DELETE(req: NextRequest, { params }: { params: { email: string } }) {
   const sessionId = req.cookies.get(SESSION_COOKIE)?.value;
@@ -12,9 +12,13 @@ export async function DELETE(req: NextRequest, { params }: { params: { email: st
     return NextResponse.json({ success: false, message: '需要管理员权限。' }, { status: 403 });
   }
 
-  const verificationToken = req.nextUrl.searchParams.get('verificationToken');
-  if (!(await isVerificationTokenValid(verificationToken))) {
-    return NextResponse.json({ success: false, message: '请先完成邮箱验证码验证，再删除用户。' }, { status: 403 });
+  const code = req.nextUrl.searchParams.get('code');
+  if (typeof code !== 'string') {
+    return NextResponse.json({ success: false, message: '请输入验证码。' }, { status: 400 });
+  }
+  const otpResult = await verifyOtp(session.email, 'admin_settings_change', code);
+  if (!otpResult.valid) {
+    return NextResponse.json({ success: false, message: otpResult.reason }, { status: 400 });
   }
 
   try {

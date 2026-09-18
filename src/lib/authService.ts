@@ -108,9 +108,6 @@ export const requestPasswordChangeOtp = () => postJson<ApiResult>('/api/auth/pas
 export const changePassword = (code: string, newPassword: string) =>
   postJson<ApiResult>('/api/auth/password/change', { code, newPassword });
 
-export const changeAdminPasswordWithToken = (newPassword: string, verificationToken: string) =>
-  postJson<ApiResult>('/api/auth/password/change', { newPassword, verificationToken });
-
 // --- Forgot password (logged out, regular users only, email OTP) ---
 
 export const requestForgotPasswordOtp = (email: string) =>
@@ -154,8 +151,8 @@ export const getAdminLoginUrlInfo = async (): Promise<{ slug: string; path: stri
 
 export const requestAdminLoginUrlChangeOtp = () => postJson<ApiResult>('/api/admin/login-url/request-otp');
 
-export const changeAdminLoginUrl = (newSlug: string, verificationToken: string) =>
-  postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { newSlug, verificationToken });
+export const changeAdminLoginUrl = (code: string, newSlug: string) =>
+  postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { code, newSlug });
 
 // --- "文献库" quick-links (admin-configurable buttons shown as their own module on the library page) ---
 
@@ -186,8 +183,10 @@ export const getLibraryLinksForAdmin = async (): Promise<LibraryLink[]> => {
   }
 };
 
-export const setLibraryLinks = (links: LibraryLink[], verificationToken: string) =>
-  postJson<ApiResult>('/api/admin/library-link', { links, verificationToken });
+export const requestLibraryLinksOtp = () => postJson<ApiResult>('/api/admin/library-link/request-otp');
+
+export const setLibraryLinks = (links: LibraryLink[], code: string) =>
+  postJson<ApiResult>('/api/admin/library-link', { links, code });
 
 // --- Storage quota (admin) ---
 
@@ -210,15 +209,12 @@ export const getStorageUsage = async (): Promise<{ users: UserStorageUsage[]; qu
   }
 };
 
-export const setStorageQuota = (quotaGB: number, verificationToken: string) =>
-  postJson<ApiResult>('/api/admin/storage', { quotaGB, verificationToken });
+export const requestStorageQuotaOtp = () => postJson<ApiResult>('/api/admin/storage/request-otp');
 
-// --- Unified admin-settings-change email verification ---
+export const setStorageQuota = (quotaGB: number, code: string) =>
+  postJson<ApiResult>('/api/admin/storage', { quotaGB, code });
 
-export const requestAdminSettingsOtp = () => postJson<ApiResult>('/api/admin/settings-otp/request');
-
-export const verifyAdminSettingsOtp = (code: string) =>
-  postJson<ApiResult & { token?: string }>('/api/admin/settings-otp/verify', { code });
+export const requestDeleteUserOtp = () => postJson<ApiResult>('/api/admin/users/request-otp');
 
 export const backfillStorageUsage = () =>
   postJson<ApiResult & { updated?: number; missing?: number }>('/api/admin/storage/backfill');
@@ -287,10 +283,10 @@ export const getAllUsersForAdmin = async (): Promise<{ email: string }[]> => {
   }
 };
 
-export const deleteUserByAdmin = async (email: string, verificationToken: string): Promise<{ success: boolean; message?: string }> => {
+export const deleteUserByAdmin = async (email: string, code: string): Promise<{ success: boolean; message?: string }> => {
   try {
     const res = await fetch(
-      `/api/admin/users/${encodeURIComponent(email)}?verificationToken=${encodeURIComponent(verificationToken)}`,
+      `/api/admin/users/${encodeURIComponent(email)}?code=${encodeURIComponent(code)}`,
       {
         method: 'DELETE',
         credentials: 'include',

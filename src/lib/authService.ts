@@ -204,6 +204,9 @@ export const getStorageUsage = async (): Promise<{ users: UserStorageUsage[]; qu
 
 export const setStorageQuota = (quotaGB: number) => postJson<ApiResult>('/api/admin/storage', { quotaGB });
 
+export const backfillStorageUsage = () =>
+  postJson<ApiResult & { updated?: number; missing?: number }>('/api/admin/storage/backfill');
+
 // --- Session ---
 
 export const logout = async (): Promise<void> => {

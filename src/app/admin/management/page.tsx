@@ -19,6 +19,7 @@ import {
   setLibraryLink,
   getStorageUsage,
   setStorageQuota,
+  backfillStorageUsage,
   type UserStorageUsage,
 } from '@/lib/authService';
 import { Trash2, Users, KeyRound, AlertTriangle, Link as LinkIcon, BookMarked, HardDrive } from 'lucide-react';
@@ -89,6 +90,7 @@ function AdminManagementPage() {
   const [storageUsers, setStorageUsers] = useState<UserStorageUsage[]>([]);
   const [quotaGBInput, setQuotaGBInput] = useState('5');
   const [isSavingQuota, setIsSavingQuota] = useState(false);
+  const [isBackfilling, setIsBackfilling] = useState(false);
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -149,6 +151,18 @@ function AdminManagementPage() {
   };
 
   const formatBytes = (bytes: number) => `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}GB`;
+
+  const handleBackfillStorage = async () => {
+    setIsBackfilling(true);
+    const result = await backfillStorageUsage();
+    setIsBackfilling(false);
+    if (result.success) {
+      toast({ title: commonDict.success, description: `已补全 ${result.updated ?? 0} 条记录的存储大小。` });
+      refreshStorageUsage();
+    } else {
+      toast({ variant: 'destructive', title: commonDict.error, description: result.message || '回填失败。' });
+    }
+  };
 
   const performDelete = async () => {
     if (!userToDelete) return;
@@ -440,7 +454,12 @@ function AdminManagementPage() {
             </div>
 
             <div>
-              <Label>各用户存储用量</Label>
+              <div className="flex items-center justify-between">
+                <Label>各用户存储用量</Label>
+                <Button size="sm" variant="ghost" onClick={handleBackfillStorage} disabled={isBackfilling} title="如果某些账号明明有文件却显示 0GB，点这个补算一次（早于配额功能上线的旧文件不会自动记录大小）">
+                  {isBackfilling ? '计算中...' : '重新计算用量'}
+                </Button>
+              </div>
               {storageUsers.length > 0 ? (
                 <ul className="mt-2 space-y-2">
                   {storageUsers.map((u) => (

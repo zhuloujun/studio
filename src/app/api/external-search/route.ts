@@ -638,12 +638,20 @@ export async function GET(req: NextRequest) {
       doaj: 'academic',
     };
     const results: ExternalSearchResult[] = await Promise.all(
-      rawResults.map(async ({ rawUrl, ...rest }) => ({
-        ...rest,
-        category: CATEGORY_BY_SOURCE[rest.source],
-        fileUrl: await signUrl(rawUrl),
-        originalUrl: rawUrl,
-      }))
+      rawResults.map(async ({ rawUrl, ...rest }) => {
+        // Apply publisher-landing-page-to-direct-PDF resolution universally,
+        // not just for the source it was first noticed on (DOAJ) - the same
+        // MDPI (etc.) article can surface via Semantic Scholar's
+        // openAccessPdf, OpenAlex's oa_url, Crossref's link, and so on, all
+        // pointing at the same landing page.
+        const resolvedUrl = resolveToDirectPdfUrl(rawUrl);
+        return {
+          ...rest,
+          category: CATEGORY_BY_SOURCE[rest.source],
+          fileUrl: await signUrl(resolvedUrl),
+          originalUrl: resolvedUrl,
+        };
+      })
     );
 
     return NextResponse.json({ success: true, results });

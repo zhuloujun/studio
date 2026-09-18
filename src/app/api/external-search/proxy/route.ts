@@ -64,16 +64,20 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // Some sources (scanned books especially, e.g. Internet Archive) can be
-    // very large - streaming an oversized file through the Worker for our
-    // OWN reader to parse is what was causing "Error 1102: Worker exceeded
-    // resource limits" crashes (and, worse, occasionally leaving the Worker
-    // instance in a bad state for a moment afterwards, making unrelated
-    // requests fail too). A plain download doesn't get parsed by anything
-    // on our side, so it gets a much more generous ceiling.
-    const MAX_BYTES = downloadFilename ? 500 * 1024 * 1024 : 40 * 1024 * 1024;
+    // Cloudflare's own limits documentation confirms it does not enforce a
+    // response body size limit for Workers (the 100/200/500MB limits people
+    // usually cite are for REQUEST bodies coming into a Worker, not what it
+    // streams back out) - and CPU time only counts actual JS execution, not
+    // time spent waiting on the network, so a long pure pass-through of even
+    // a multi-GB file shouldn't cost meaningful CPU time either. So a
+    // download (nothing on our side ever buffers or parses it - it's piped
+    // straight through to the browser's download manager) genuinely has no
+    // size ceiling here. "Open in reader" is different: that DOES get fully
+    // buffered client-side and handed to pdf.js/mammoth/etc, which is what
+    // was crashing on oversized files - that path keeps its 40MB cap.
+    const MAX_BYTES = 40 * 1024 * 1024;
     const declaredLength = upstream.headers.get('content-length');
-    if (declaredLength && parseInt(declaredLength, 10) > MAX_BYTES) {
+    if (!downloadFilename && declaredLength && parseInt(declaredLength, 10) > MAX_BYTES) {
       return new NextResponse('File too large', { status: 413 });
     }
 
@@ -88,18 +92,17 @@ export async function GET(req: NextRequest) {
       headers.set('Content-Disposition', `attachment; filename="${downloadFilename.replace(/"/g, "'")}"`);
     }
 
-    // No Content-Length was declared (common with chunked responses) - guard
-    // against an unexpectedly huge body by counting bytes as they stream
-    // through and aborting if the limit is exceeded, rather than trusting
-    // the source to be well-behaved.
-    if (!declaredLength) {
+    // No Content-Length was declared (common with chunked responses) - for
+    // the "open in reader" path, guard against an unexpectedly huge body by
+    // counting bytes as they stream through and aborting if the limit is
+    // exceeded, rather than trusting the source to be well-behaved. Downloads
+    // skip this entirely - see the no-size-limit note above.
+    if (!declaredLength && !downloadFilename) {
       let total = 0;
-      let aborted = false;
       const limiter = new TransformStream<Uint8Array, Uint8Array>({
         transform(chunk, controller) {
           total += chunk.byteLength;
           if (total > MAX_BYTES) {
-            aborted = true;
             controller.error(new Error('File too large'));
             return;
           }

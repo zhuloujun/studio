@@ -3,6 +3,7 @@ import { hashPassword } from '@/lib/passwordHash';
 import { getEnv } from '@/lib/cloudflare';
 import { getSession, SESSION_COOKIE } from '@/lib/sessionService';
 import { verifyOtp } from '@/lib/otpService';
+import { isVerificationTokenValid } from '@/lib/adminSettingsVerification';
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,17 +13,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, message: '请先登录。' }, { status: 401 });
     }
 
-    const { code, newPassword } = (await req.json()) as { code?: string; newPassword?: string };
-    if (typeof code !== 'string' || typeof newPassword !== 'string') {
+    const { code, newPassword, verificationToken } = (await req.json()) as {
+      code?: string;
+      newPassword?: string;
+      verificationToken?: string;
+    };
+    if (typeof newPassword !== 'string') {
       return NextResponse.json({ success: false, message: '参数不完整。' }, { status: 400 });
     }
     if (newPassword.length < 4) {
       return NextResponse.json({ success: false, message: '密码长度至少为 4 位。' }, { status: 400 });
     }
 
-    const otpResult = await verifyOtp(session.email, 'reset_password', code);
-    if (!otpResult.valid) {
-      return NextResponse.json({ success: false, message: otpResult.reason }, { status: 400 });
+    // Admins changing their own password from the admin management page use
+    // the page's single unified verification token instead of a one-off OTP
+    // for this specific action - regular users (profile page) still go
+    // through the normal per-action OTP below.
+    if (session.isAdmin && verificationToken) {
+      if (!(await isVerificationTokenValid(verificationToken))) {
+        return NextResponse.json({ success: false, message: '请先完成邮箱验证码验证，再修改设置。' }, { status: 403 });
+      }
+    } else {
+      if (typeof code !== 'string') {
+        return NextResponse.json({ success: false, message: '参数不完整。' }, { status: 400 });
+      }
+      const otpResult = await verifyOtp(session.email, 'reset_password', code);
+      if (!otpResult.valid) {
+        return NextResponse.json({ success: false, message: otpResult.reason }, { status: 400 });
+      }
     }
 
     const env = getEnv();

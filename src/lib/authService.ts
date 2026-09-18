@@ -108,6 +108,9 @@ export const requestPasswordChangeOtp = () => postJson<ApiResult>('/api/auth/pas
 export const changePassword = (code: string, newPassword: string) =>
   postJson<ApiResult>('/api/auth/password/change', { code, newPassword });
 
+export const changeAdminPasswordWithToken = (newPassword: string, verificationToken: string) =>
+  postJson<ApiResult>('/api/auth/password/change', { newPassword, verificationToken });
+
 // --- Forgot password (logged out, regular users only, email OTP) ---
 
 export const requestForgotPasswordOtp = (email: string) =>
@@ -151,8 +154,8 @@ export const getAdminLoginUrlInfo = async (): Promise<{ slug: string; path: stri
 
 export const requestAdminLoginUrlChangeOtp = () => postJson<ApiResult>('/api/admin/login-url/request-otp');
 
-export const changeAdminLoginUrl = (code: string, newSlug: string) =>
-  postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { code, newSlug });
+export const changeAdminLoginUrl = (newSlug: string, verificationToken: string) =>
+  postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { newSlug, verificationToken });
 
 // --- "文献库" quick-links (admin-configurable buttons shown as their own module on the library page) ---
 
@@ -284,12 +287,15 @@ export const getAllUsersForAdmin = async (): Promise<{ email: string }[]> => {
   }
 };
 
-export const deleteUserByAdmin = async (email: string): Promise<{ success: boolean; message?: string }> => {
+export const deleteUserByAdmin = async (email: string, verificationToken: string): Promise<{ success: boolean; message?: string }> => {
   try {
-    const res = await fetch(`/api/admin/users/${encodeURIComponent(email)}`, {
-      method: 'DELETE',
-      credentials: 'include',
-    });
+    const res = await fetch(
+      `/api/admin/users/${encodeURIComponent(email)}?verificationToken=${encodeURIComponent(verificationToken)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      }
+    );
     const data = (await res.json()) as ApiResult;
     if (data.success) {
       // Best-effort cleanup of this browser's local data for that account.

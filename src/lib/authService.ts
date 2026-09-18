@@ -154,32 +154,37 @@ export const requestAdminLoginUrlChangeOtp = () => postJson<ApiResult>('/api/adm
 export const changeAdminLoginUrl = (code: string, newSlug: string) =>
   postJson<ApiResult & { path?: string }>('/api/admin/login-url/change', { code, newSlug });
 
-// --- "文献库" quick-link (admin-configurable button shown above the external literature search) ---
+// --- "文献库" quick-links (admin-configurable buttons shown as their own module on the library page) ---
 
-export const getLibraryLink = async (): Promise<{ url: string; label: string } | null> => {
+export interface LibraryLink {
+  url: string;
+  label: string;
+}
+
+export const getLibraryLinks = async (): Promise<LibraryLink[]> => {
   try {
     const res = await fetch('/api/settings/library-link', { credentials: 'include' });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { success: boolean; link?: { url: string; label: string } | null };
-    return data.success ? data.link || null : null;
+    if (!res.ok) return [];
+    const data = (await res.json()) as { success: boolean; links?: LibraryLink[] };
+    return data.success ? data.links || [] : [];
   } catch {
-    return null;
+    return [];
   }
 };
 
-export const getLibraryLinkForAdmin = async (): Promise<{ url: string; label: string }> => {
+export const getLibraryLinksForAdmin = async (): Promise<LibraryLink[]> => {
   try {
     const res = await fetch('/api/admin/library-link', { credentials: 'include' });
-    if (!res.ok) return { url: '', label: '' };
-    const data = (await res.json()) as { success: boolean; url?: string; label?: string };
-    return { url: data.url || '', label: data.label || '' };
+    if (!res.ok) return [];
+    const data = (await res.json()) as { success: boolean; links?: LibraryLink[] };
+    return data.success ? data.links || [] : [];
   } catch {
-    return { url: '', label: '' };
+    return [];
   }
 };
 
-export const setLibraryLink = (url: string, label: string) =>
-  postJson<ApiResult>('/api/admin/library-link', { url, label });
+export const setLibraryLinks = (links: LibraryLink[]) =>
+  postJson<ApiResult>('/api/admin/library-link', { links });
 
 // --- Storage quota (admin) ---
 

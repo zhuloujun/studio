@@ -15,8 +15,9 @@ import {
   changePassword,
   requestAdminLoginUrlChangeOtp,
   changeAdminLoginUrl,
-  getLibraryLinkForAdmin,
-  setLibraryLink,
+  getLibraryLinksForAdmin,
+  setLibraryLinks,
+  type LibraryLink,
   getStorageUsage,
   setStorageQuota,
   backfillStorageUsage,
@@ -81,9 +82,8 @@ function AdminManagementPage() {
   const [isSubmittingUrl, setIsSubmittingUrl] = useState(false);
   const urlCooldown = useCooldown();
 
-  // --- "文献库" quick-link ---
-  const [libraryLinkUrl, setLibraryLinkUrl] = useState('');
-  const [libraryLinkLabel, setLibraryLinkLabel] = useState('');
+  // --- "文献库" quick-links (multiple) ---
+  const [libraryLinks, setLibraryLinksState] = useState<LibraryLink[]>([]);
   const [isSavingLibraryLink, setIsSavingLibraryLink] = useState(false);
 
   // --- Storage quota ---
@@ -102,10 +102,9 @@ function AdminManagementPage() {
     const info = await getAdminLoginUrlInfo();
     if (info) setCurrentLoginPath(info.path);
   };
-  const refreshLibraryLink = async () => {
-    const { url, label } = await getLibraryLinkForAdmin();
-    setLibraryLinkUrl(url);
-    setLibraryLinkLabel(label);
+  const refreshLibraryLinks = async () => {
+    const links = await getLibraryLinksForAdmin();
+    setLibraryLinksState(links.length > 0 ? links : [{ url: '', label: '' }]);
   };
   const refreshStorageUsage = async () => {
     const result = await getStorageUsage();
@@ -118,16 +117,24 @@ function AdminManagementPage() {
   useEffect(() => {
     refreshUsers();
     refreshLoginUrl();
-    refreshLibraryLink();
+    refreshLibraryLinks();
     refreshStorageUsage();
   }, []);
 
+  const handleLibraryLinkChange = (index: number, field: 'url' | 'label', value: string) => {
+    setLibraryLinksState((prev) => prev.map((link, i) => (i === index ? { ...link, [field]: value } : link)));
+  };
+  const handleAddLibraryLinkRow = () => setLibraryLinksState((prev) => [...prev, { url: '', label: '' }]);
+  const handleRemoveLibraryLinkRow = (index: number) =>
+    setLibraryLinksState((prev) => prev.filter((_, i) => i !== index));
+
   const handleSaveLibraryLink = async () => {
     setIsSavingLibraryLink(true);
-    const result = await setLibraryLink(libraryLinkUrl.trim(), libraryLinkLabel.trim());
+    const result = await setLibraryLinks(libraryLinks);
     setIsSavingLibraryLink(false);
     if (result.success) {
       toast({ title: commonDict.success, description: '文献库跳转链接已更新。' });
+      refreshLibraryLinks();
     } else {
       toast({ variant: 'destructive', title: commonDict.error, description: result.message || '保存失败。' });
     }
@@ -402,29 +409,51 @@ function AdminManagementPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2"><BookMarked />"文献库"跳转按钮</CardTitle>
+            <CardTitle className="flex items-center gap-2"><BookMarked />"文献库"导航模块</CardTitle>
             <CardDescription>
-              配置后，普通用户在 library 页面"从学术文献库搜索"区域上方会看到一个按钮，点击后跳转到这里设置的地址（比如你自己机构的图书馆入口）。留空则不显示这个按钮。
+              配置后，普通用户在 library 页面会看到一个独立的"文献库"导航区域，每一行对应一个跳转按钮（比如各个机构图书馆入口）。可以添加多个，全部留空则不显示这个模块。
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-2">
-            <Label htmlFor="library-link-label">按钮文字</Label>
-            <Input
-              id="library-link-label"
-              value={libraryLinkLabel}
-              onChange={(e) => setLibraryLinkLabel(e.target.value)}
-              placeholder="例如：图书馆入口"
-            />
-            <Label htmlFor="library-link-url">跳转地址</Label>
-            <Input
-              id="library-link-url"
-              value={libraryLinkUrl}
-              onChange={(e) => setLibraryLinkUrl(e.target.value)}
-              placeholder="https://example.com"
-            />
-            <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink} className="mt-2">
-              {isSavingLibraryLink ? '保存中...' : '保存'}
-            </Button>
+          <CardContent className="space-y-3">
+            {libraryLinks.map((link, index) => (
+              <div key={index} className="flex items-end gap-2">
+                <div className="flex-1">
+                  <Label htmlFor={`library-link-label-${index}`}>按钮文字</Label>
+                  <Input
+                    id={`library-link-label-${index}`}
+                    value={link.label}
+                    onChange={(e) => handleLibraryLinkChange(index, 'label', e.target.value)}
+                    placeholder="例如：图书馆入口"
+                  />
+                </div>
+                <div className="flex-[2]">
+                  <Label htmlFor={`library-link-url-${index}`}>跳转地址</Label>
+                  <Input
+                    id={`library-link-url-${index}`}
+                    value={link.url}
+                    onChange={(e) => handleLibraryLinkChange(index, 'url', e.target.value)}
+                    placeholder="https://example.com"
+                  />
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => handleRemoveLibraryLinkRow(index)}
+                  disabled={libraryLinks.length <= 1}
+                  title="删除这一行"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={handleAddLibraryLinkRow}>
+                + 添加一个链接
+              </Button>
+              <Button onClick={handleSaveLibraryLink} disabled={isSavingLibraryLink}>
+                {isSavingLibraryLink ? '保存中...' : '保存全部'}
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

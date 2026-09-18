@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { UploadCloud, Info, Trash2, BookOpen, FileText, Image as ImageIcon, RefreshCw, Loader2, Save, FileType2, Book, Search, ExternalLink, Star, Download, BookMarked, HardDrive } from 'lucide-react';
 import * as IndexedDBService from '@/lib/indexedDBService';
-import { getLibraryLink, getMyStorageUsage } from '@/lib/authService';
+import { getLibraryLinks, getMyStorageUsage, type LibraryLink } from '@/lib/authService';
 import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
@@ -93,7 +93,7 @@ function LibraryPageContent() {
   const [openingExternalId, setOpeningExternalId] = useState<string | null>(null);
   const [savingExternalId, setSavingExternalId] = useState<string | null>(null);
   const [externalSearchError, setExternalSearchError] = useState('');
-  const [libraryLink, setLibraryLink] = useState<{ url: string; label: string } | null>(null);
+  const [libraryLinks, setLibraryLinks] = useState<LibraryLink[]>([]);
   const [myStorageUsage, setMyStorageUsage] = useState<{ usedBytes: number; quotaBytes: number; percentage: number } | null>(null);
 
   const { locale } = useContext(LanguageContext);
@@ -151,7 +151,7 @@ function LibraryPageContent() {
       setExternalResults(cachedSearch.results);
     }
 
-    getLibraryLink().then(setLibraryLink);
+    getLibraryLinks().then(setLibraryLinks);
     getMyStorageUsage().then(setMyStorageUsage);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -383,22 +383,31 @@ function LibraryPageContent() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
-              {libraryLink && (
+        {libraryLinks.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><BookMarked className="text-primary" />文献库导航</CardTitle>
+              <CardDescription>快速跳转到其他文献资源平台。</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-wrap gap-2">
+              {libraryLinks.map((link, index) => (
                 <Button
-                  size="sm"
+                  key={index}
                   asChild
                   className="bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white shadow-md border-0 font-semibold"
                 >
-                  <a href={libraryLink.url} target="_blank" rel="noopener noreferrer">
-                    <BookMarked className="mr-1.5 h-4 w-4" /> {libraryLink.label} <ExternalLink className="ml-1.5 h-3 w-3" />
+                  <a href={link.url} target="_blank" rel="noopener noreferrer">
+                    <BookMarked className="mr-1.5 h-4 w-4" /> {link.label} <ExternalLink className="ml-1.5 h-3 w-3" />
                   </a>
                 </Button>
-              )}
-            </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Search className="text-primary" />从学术文献库搜索</CardTitle>
             <CardDescription>
               目前接入 arXiv、Semantic Scholar、OpenAlex、Crossref、Zenodo、DOAJ（学术论文/期刊）、PubMed Central（医学文献）、Knowledge Commons Works、Internet Archive、Project Gutenberg（电子书，含 EPUB/TXT/MOBI 格式），点击"阅读"直接在线浏览，不会占用你的存储空间。
             </CardDescription>
@@ -475,21 +484,26 @@ function LibraryPageContent() {
               {libraryDict.storedDocumentsDescription}
             </CardDescription>
             {myStorageUsage && (
-              <div className="mt-2 max-w-sm">
-                <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                  <span className="flex items-center gap-1"><HardDrive className="h-3 w-3" />存储用量</span>
-                  <span>
-                    {(myStorageUsage.usedBytes / (1024 * 1024 * 1024)).toFixed(2)}GB / {(myStorageUsage.quotaBytes / (1024 * 1024 * 1024)).toFixed(1)}GB（{myStorageUsage.percentage}%）
+              <div className="mt-3 max-w-sm p-3 rounded-lg border bg-muted/40">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                    <HardDrive className="h-4 w-4 text-primary" />存储用量
+                  </span>
+                  <span className="text-sm font-bold tabular-nums">
+                    <span className={myStorageUsage.percentage >= 90 ? 'text-destructive' : 'text-primary'}>
+                      {(myStorageUsage.usedBytes / (1024 * 1024 * 1024)).toFixed(2)}GB
+                    </span>
+                    <span className="text-muted-foreground font-normal"> / {(myStorageUsage.quotaBytes / (1024 * 1024 * 1024)).toFixed(1)}GB（{myStorageUsage.percentage}%）</span>
                   </span>
                 </div>
-                <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className="w-full h-2 bg-background rounded-full overflow-hidden border">
                   <div
-                    className={myStorageUsage.percentage >= 90 ? 'h-full bg-destructive' : 'h-full bg-primary'}
+                    className={`h-full rounded-full transition-all ${myStorageUsage.percentage >= 90 ? 'bg-destructive' : 'bg-primary'}`}
                     style={{ width: `${Math.min(100, myStorageUsage.percentage)}%` }}
                   />
                 </div>
                 {myStorageUsage.percentage >= 80 && (
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-muted-foreground mt-1.5">
                     存储空间快用完了，大文件可以考虑用"保存到本地设备"按钮存到自己电脑上，不占用这里的额度。
                   </p>
                 )}

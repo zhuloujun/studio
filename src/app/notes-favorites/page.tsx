@@ -4,8 +4,10 @@ import { useState, useEffect, useCallback, useRef, useContext } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { Trash2, Info, NotebookText, FileText, Play, Pause, Loader2, Smartphone, Cloud as CloudIcon, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, Pencil } from 'lucide-react';
+import { Trash2, Info, NotebookText, FileText, Play, Pause, Loader2, Smartphone, Cloud as CloudIcon, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, Pencil, BookOpen } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import * as LocalStorage from '@/lib/localStorageService';
+import { documentExists } from '@/lib/indexedDBService';
 import { fetchNoteFavorites, deleteNoteFavoriteRemote } from '@/lib/authService';
 import type { NoteFavoriteItem, TTSVoice, TTSSettings, PlaybackMode } from '@/types';
 import { format } from 'date-fns';
@@ -76,10 +78,12 @@ const HighlightableText: React.FC<{
 
 function NotesFavoritesPageContent() {
   const { toast } = useToast();
+  const router = useRouter();
   const [favoriteNotes, setFavoriteNotes] = useState<NoteFavoriteItem[]>([]);
   const [noteToDelete, setNoteToDelete] = useState<NoteFavoriteItem | null>(null);
   const [availableVoices, setAvailableVoices] = useState<TTSVoice[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
+  const [jumpingItemId, setJumpingItemId] = useState<string | null>(null);
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -155,6 +159,39 @@ function NotesFavoritesPageContent() {
       LocalStorage.saveNotesPlaybackMode(playbackMode);
   }, [playbackMode]);
 
+
+  // Jumps back to the exact spot in the reader this note was captured from.
+  // Checks the source document still exists first (a lightweight
+  // metadata-only check, not a full file download) so a deleted document
+  // shows a clear message here instead of navigating into a broken reader
+  // page. The annotation's pageNumber means different things per document
+  // type (PDF/EPUB page vs. MOBI chapter index) and this list doesn't track
+  // which type the source document is, so it's passed as both `page` and
+  // `chapter` - the reader only reads whichever one is actually relevant to
+  // the document it opens.
+  const handleJumpToSource = async (item: NoteFavoriteItem) => {
+    if (!item.sourceDocumentId || item.sourceDocumentId === 'scratchpad') {
+      router.push('/reader');
+      return;
+    }
+    setJumpingItemId(item.id);
+    try {
+      const exists = await documentExists(item.sourceDocumentId);
+      if (!exists) {
+        toast({ variant: 'destructive', title: '原文献已被删除', description: '无法跳转，原文献已经被删除。' });
+        return;
+      }
+      const params = new URLSearchParams({ docId: item.sourceDocumentId });
+      if (item.annotation.pageNumber !== undefined) {
+        params.set('page', String(item.annotation.pageNumber));
+        params.set('chapter', String(item.annotation.pageNumber));
+      }
+      if (item.annotation.epubCfi) params.set('cfi', item.annotation.epubCfi);
+      router.push(`/reader?${params.toString()}`);
+    } finally {
+      setJumpingItemId(null);
+    }
+  };
 
   const handlePlayPauseNote = (item: NoteFavoriteItem) => {
     if (currentItem?.item.id === item.id && currentItem?.type === 'note_favorite') {
@@ -530,6 +567,17 @@ function NotesFavoritesPageContent() {
                                 title={hasContentToPlay ? notesFavDict.playPauseNote : notesFavDict.noTextToPlay}
                                 >
                                 {buttonIcon} {buttonText}
+                            </Button>
+                            <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-8 w-8"
+                                onClick={() => handleJumpToSource(item)}
+                                disabled={jumpingItemId === item.id}
+                                aria-label="Jump to source in reader"
+                                title="跳转回原文献位置"
+                                >
+                                {jumpingItemId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <BookOpen className="h-4 w-4" />}
                             </Button>
                             <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setNoteToDelete(item)} aria-label="Delete Note Favorite" disabled={isLoading && isCurrentlyPlayingThisItem}>
                                 <Trash2 className="h-4 w-4 text-destructive" />

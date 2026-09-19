@@ -194,6 +194,30 @@ export async function getDocumentById(id: string): Promise<StoredMangaDocument |
   return fresh;
 }
 
+// Lightweight existence check for a document, used before navigating to it
+// from elsewhere (e.g. "jump back to original document" from a favorite or
+// note-favorite) - deliberately does NOT go through getDocumentById, which
+// would download the full file bytes just to answer "does this still
+// exist?". A cache hit is trusted without a network round-trip; otherwise
+// this hits the metadata-only endpoint (no fileUrl fetch).
+export async function documentExists(id: string): Promise<boolean> {
+  if (isEphemeralDocId(id)) {
+    return !!(await getEphemeralDocument(id));
+  }
+  if (await getCachedDocument(id)) return true;
+  try {
+    const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { credentials: 'include' });
+    if (res.status === 404) return false;
+    const data = (await res.json().catch(() => ({}))) as any;
+    return !!(data?.success && data?.document);
+  } catch {
+    // Network hiccup shouldn't block navigation with a false "deleted"
+    // message - let the reader page itself report the error if it truly
+    // can't load the document.
+    return true;
+  }
+}
+
 export async function getAllDocuments(forceRefresh: boolean = false): Promise<StoredMangaDocument[]> {
   const user = getCachedUser();
   if (!user) return [];

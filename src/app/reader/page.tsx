@@ -274,6 +274,14 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [isEpubReadyForJumping, setIsEpubReadyForJumping] = useState(false);
   const [epubToc, setEpubToc] = useState<any[]>([]); // For EPUB table of contents
   const [isTocOpen, setIsTocOpen] = useState(false);
+  // EPUB reading mode: continuous vertical scroll (like the PDF reader's
+  // default) vs. the traditional one-page-at-a-time flip. Continuous scroll
+  // is the default per user request. Mirrored into a ref so the doc-load
+  // effect (which only re-runs when the document itself changes) always
+  // reads the latest choice without needing to be re-triggered by it.
+  const [isEpubContinuousScroll, setIsEpubContinuousScroll] = useState(true);
+  const isEpubContinuousScrollRef = useRef(true);
+  useEffect(() => { isEpubContinuousScrollRef.current = isEpubContinuousScroll; }, [isEpubContinuousScroll]);
 
 
   const [txtContent, setTxtContent] = useState<string>("");
@@ -302,11 +310,16 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
     if (!chapter) return false;
     setMobiCurrentIndex(chapterIndex);
     setMobiHtmlContent(chapter.html);
-    const plainText = new DOMParser().parseFromString(chapter.html, 'text/html').body.textContent || "";
+    // A previously-edited chapter's text (saved via "EDIT TTS TEXT") lives
+    // in mobiTextPerChapter, separate from the book's own fileData - see
+    // handleEditTtsText for why edits are never written into fileData
+    // itself for MOBI.
+    const savedChapterText = (activeDoc?.type === 'mobi' ? (activeDoc as StoredMobiDocument).mobiTextPerChapter?.[chapterIndex] : undefined);
+    const plainText = savedChapterText ?? (new DOMParser().parseFromString(chapter.html, 'text/html').body.textContent || "");
     setCurrentTextForTTS(plainText);
     if (mainHighlightedContentRef.current) mainHighlightedContentRef.current.scrollTop = 0;
     return true;
-  }, [mobiSpine]);
+  }, [mobiSpine, activeDoc]);
   const [displayedImageSrc, setDisplayedImageSrc] = useState<string | null>(null);
   const currentImageObjectUrlRef = useRef<string | null>(null);
   
@@ -955,8 +968,35 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                   if (isStale) return;
                   if (!epubViewerRef.current) throw new Error("EPUB viewer element not ready.");
             
-                  const rendition = book.renderTo("epub-viewer", { width: "100%", height: "100%", flow: "paginated", spread: "none" });
+                  const rendition = book.renderTo("epub-viewer", {
+                      width: "100%",
+                      height: "100%",
+                      flow: isEpubContinuousScrollRef.current ? "scrolled-doc" : "paginated",
+                      spread: "none",
+                  });
                   epubRenditionRef.current = rendition;
+
+                  // epub.js renders each chapter inside its own iframe, so a
+                  // touch/swipe on the actual book text never reaches a
+                  // touchstart/touchend handler attached to the outer React
+                  // div - it's a separate document. epub.js re-dispatches
+                  // touch events through the rendition itself specifically
+                  // so gesture navigation can be wired up here instead. Only
+                  // meaningful in paged mode - continuous scroll mode is
+                  // already navigated by the normal scroll gesture.
+                  let epubTouchStartX = 0;
+                  rendition.on('touchstart', (event: TouchEvent) => {
+                      epubTouchStartX = event.changedTouches[0].screenX;
+                  });
+                  rendition.on('touchend', (event: TouchEvent) => {
+                      if (isEpubContinuousScrollRef.current) return;
+                      const touchEndX = event.changedTouches[0].screenX;
+                      const xDiff = epubTouchStartX - touchEndX;
+                      const swipeThreshold = 50;
+                      if (Math.abs(xDiff) <= swipeThreshold) return;
+                      if (xDiff > 0) navigateEpub('next');
+                      else navigateEpub('prev');
+                  });
 
                   rendition.on('displayed', async (view: any) => {
                      await book.ready;
@@ -1049,7 +1089,8 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                     if (firstChapter) {
                         setMobiCurrentIndex(0);
                         setMobiHtmlContent(firstChapter.html);
-                        const plainText = new DOMParser().parseFromString(firstChapter.html, 'text/html').body.textContent || "";
+                        const savedChapterText = (doc as StoredMobiDocument).mobiTextPerChapter?.[0];
+                        const plainText = savedChapterText ?? (new DOMParser().parseFromString(firstChapter.html, 'text/html').body.textContent || "");
                         setCurrentTextForTTS(plainText);
                     }
                 }
@@ -1969,6 +2010,23 @@ HighlightableContent.displayName = 'HighlightableContent';
     }
 };
 
+  const handleToggleEpubFlow = () => {
+    const next = !isEpubContinuousScroll;
+    setIsEpubContinuousScroll(next);
+    isEpubContinuousScrollRef.current = next;
+    const rendition = epubRenditionRef.current;
+    if (rendition) {
+        stopSpeech(true);
+        try {
+            // epub.js supports switching flow live, without reloading the
+            // book or losing the current reading position.
+            rendition.flow(next ? 'scrolled-doc' : 'paginated');
+        } catch (e) {
+            console.warn('[EPUB] Failed to switch flow mode live:', e);
+        }
+    }
+  };
+
   const handleSwitchToScratchpad = async () => {
     stopSpeech(true);
     await IndexedDBService.saveLastActiveDocId(null);
@@ -2001,11 +2059,11 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (Math.abs(xDiff) > swipeThreshold) {
       if (xDiff > 0) { // Swiped left
         if (activeDoc?.type === 'pdf' && !isPdfTextView) navigatePdf('next');
-        if (activeDoc?.type === 'epub') navigateEpub('next');
+        if (activeDoc?.type === 'epub' && !isEpubContinuousScroll) navigateEpub('next');
         if (activeDoc?.type === 'mobi') navigateMobi('next');
       } else { // Swiped right
         if (activeDoc?.type === 'pdf' && !isPdfTextView) navigatePdf('prev');
-        if (activeDoc?.type === 'epub') navigateEpub('prev');
+        if (activeDoc?.type === 'epub' && !isEpubContinuousScroll) navigateEpub('prev');
         if (activeDoc?.type === 'mobi') navigateMobi('prev');
       }
     }
@@ -2276,15 +2334,23 @@ HighlightableContent.displayName = 'HighlightableContent';
             let fileChanged = false;
             // Which single page's OCR text is being edited, for the
             // post-save verification below - only meaningful for the PDF
-            // image-mode branch.
+            // branch.
             let editedPdfPageNum: number | null = null;
+            let editedMobiChapterIndex: number | null = null;
             const editedTextSnapshot = currentTextForTTS;
 
             if (updatedDoc.type === 'image') {
                 updatedDoc.extractedText = currentTextForTTS;
                 metadataOnlyPatch = { extractedText: currentTextForTTS };
                 docNeedsSave = true;
-            } else if (updatedDoc.type === 'pdf' && !isPdfTextView) {
+            } else if (updatedDoc.type === 'pdf') {
+                // Regardless of image/text view mode: fileData here is the
+                // actual PDF binary, not the displayed text, so an edit must
+                // only ever update this one page's stored OCR/edited text -
+                // never fileData. (isPdfTextView used to route here into
+                // the fileData-rewrite branch below, which replaced the
+                // *entire multi-page PDF's binary content* with just the
+                // current page's plain text - destroying the file.)
                 const pageNum = currentPdfPageNum;
                 editedPdfPageNum = pageNum;
                 // Clone rather than mutate activeDoc's own ocrTextPerPage
@@ -2294,7 +2360,20 @@ HighlightableContent.displayName = 'HighlightableContent';
                 updatedDoc.ocrTextPerPage = { ...(updatedDoc.ocrTextPerPage || {}), [pageNum]: currentTextForTTS };
                 metadataOnlyPatch = { ocrTextPerPage: updatedDoc.ocrTextPerPage };
                 docNeedsSave = true;
-            } else if (updatedDoc.type === 'txt' || (updatedDoc.type === 'pdf' && isPdfTextView) || updatedDoc.type === 'mobi') {
+            } else if (updatedDoc.type === 'mobi') {
+                // Same reasoning as PDF above: fileData is the actual
+                // MOBI/PalmDB binary container. Overwriting it with the
+                // current chapter's plain text (as used to happen) destroys
+                // the book's structure - it can never be parsed/opened
+                // again afterward, which is exactly the "MOBI won't open
+                // anymore" symptom. Store edits per-chapter in metadata
+                // instead, exactly like ocrTextPerPage for PDFs.
+                const chapterIndex = mobiCurrentIndex;
+                editedMobiChapterIndex = chapterIndex;
+                updatedDoc.mobiTextPerChapter = { ...(updatedDoc.mobiTextPerChapter || {}), [chapterIndex]: currentTextForTTS };
+                metadataOnlyPatch = { mobiTextPerChapter: updatedDoc.mobiTextPerChapter };
+                docNeedsSave = true;
+            } else if (updatedDoc.type === 'txt') {
                 const tempDiv = document.createElement('div');
                 tempDiv.innerHTML = currentTextForTTS;
                 const textContentForSave = tempDiv.textContent || tempDiv.innerText || '';
@@ -2331,7 +2410,9 @@ HighlightableContent.displayName = 'HighlightableContent';
                             const savedOk = verifyData?.success && (
                                 editedPdfPageNum !== null
                                     ? verifyData.document?.ocrTextPerPage?.[editedPdfPageNum] === editedTextSnapshot
-                                    : (verifyData.document?.extractedText === editedTextSnapshot || fileChanged)
+                                    : editedMobiChapterIndex !== null
+                                        ? verifyData.document?.mobiTextPerChapter?.[editedMobiChapterIndex] === editedTextSnapshot
+                                        : (verifyData.document?.extractedText === editedTextSnapshot || fileChanged)
                             );
                             if (!savedOk) {
                                 toast({ variant: "destructive", title: "Save Verification Failed", description: "The edit was sent, but the server doesn't show it saved yet. Please try saving again, and check your connection." });
@@ -2478,7 +2559,12 @@ HighlightableContent.displayName = 'HighlightableContent';
             height: `${100 / viewScale}%`,
         };
         return (
-            <div className="w-full h-full">
+            <div
+                className="w-full h-full"
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+            >
                 <div id="epub-viewer" ref={epubViewerRef} style={viewerStyle} />
             </div>
         );
@@ -2891,6 +2977,15 @@ HighlightableContent.displayName = 'HighlightableContent';
                                     )}
                                     <Button onClick={() => navigateEpub('next')} size="icon" variant="outline" disabled={isEpubLoading || isEpubPaginating} aria-label="Next Page"><ChevronRight className="h-4 w-4"/></Button>
                                 </div>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="w-full"
+                                    onClick={handleToggleEpubFlow}
+                                    disabled={isEpubLoading}
+                                >
+                                    {isEpubContinuousScroll ? readerDict.switchToPagedView : readerDict.switchToContinuousView}
+                                </Button>
                                 </>
                             )}
                             {(activeDoc?.type && ['pdf', 'image', 'epub'].includes(activeDoc.type)) && (

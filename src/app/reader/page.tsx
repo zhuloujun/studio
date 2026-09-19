@@ -762,30 +762,6 @@ const EPUB_BLOCK_TAGS = new Set([
     'BLOCKQUOTE', 'TR', 'TABLE', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'BR',
 ]);
 
-// Whether `el` should insert a paragraph break in walkEpubPlainText.
-// Prefers the element's actual computed `display` (what innerText itself
-// goes by) over a static tag-name guess - some EPUB conversions wrap each
-// original scanned line, footnote marker, or even individual word in a
-// <div>/<p> purely for styling, with CSS forcing it to lay out inline; a
-// tag-name-only check inserted a break there anyway, fragmenting a single
-// sentence into a break-separated run of one or two words each. Falls back
-// to the tag whitelist only if computed style isn't available (e.g. no
-// window on this document for some reason).
-function isEpubBlockBoundary(el: Element): boolean {
-    if (el.tagName === 'BR') return true;
-    const view = el.ownerDocument?.defaultView;
-    if (view) {
-        try {
-            const display = view.getComputedStyle(el).display;
-            if (display) {
-                return display === 'block' || display === 'list-item' || display === 'table' ||
-                    display === 'table-row' || display === 'flex' || display === 'grid';
-            }
-        } catch { /* fall through to the tag-based guess below */ }
-    }
-    return EPUB_BLOCK_TAGS.has(el.tagName);
-}
-
 // Walks every text node under `root` in document order, calling
 // `onSegment(text, node)` for each one - and, once real content has
 // started, also for a synthetic "\n" (node: null) whenever a block-level
@@ -808,7 +784,7 @@ function walkEpubPlainText(root: HTMLElement, onSegment: (text: string, node: Te
                 started = true;
             }
             if (onSegment(text, node as Text)) return;
-        } else if (node.nodeType === Node.ELEMENT_NODE && isEpubBlockBoundary(node as Element)) {
+        } else if (node.nodeType === Node.ELEMENT_NODE && EPUB_BLOCK_TAGS.has((node as Element).tagName)) {
             if (started) {
                 if (onSegment('\n', null)) return;
             }
@@ -860,48 +836,48 @@ function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Tex
 // offset into extractEpubPlainText(root)'s string. A selection's start
 // index used to be computed as `Range.toString().length` of everything
 // before it - a plain concatenation of raw text with no paragraph-break
-// characters - which drifted out of sync with currentTextForTTS/
+// characters - which drifts out of sync with currentTextForTTS/
 // findEpubTextPosition (built with synthetic "\n"s) by one character per
-// block boundary crossed before the selection, same root cause as the
-// marker-position bug this replaced. Walking with the exact same
-// walkEpubPlainText sequence keeps a selection's offset in the same space
-// as everything else, so "repeat"/"play from selection" land on the actual
-// selected text instead of drifting earlier with every paragraph in between.
+// block boundary crossed before the selection - that's what made "repeat"/
+// "play from selection" start slightly before the actual selection.
+//
+// Deliberately simple and cheap: this runs on every 'selectionchange' event
+// while the person is dragging to select text (which can fire many times a
+// second), so it walks the text nodes once, comparing plain node identity -
+// no per-node Range.comparePoint/getComputedStyle calls, which are what
+// made an earlier version of this fix slow enough (and, via one thrown
+// exception away from silently losing the selection) to break highlighting
+// and annotations outright. startContainer is virtually always the Text
+// node itself for a real text selection; the fallback below (walking to the
+// first text node at or after targetNode in document order) only matters
+// for the rare selection that anchors on an element boundary instead.
 function epubDomPositionToTextOffset(root: HTMLElement, targetNode: Node, targetOffset: number): number {
-    const doc = root.ownerDocument;
-    let preRange: Range;
-    try {
-        preRange = doc.createRange();
-        preRange.setStart(root, 0);
-        preRange.setEnd(targetNode, targetOffset);
-    } catch {
-        return 0;
+    if (targetNode.nodeType === Node.TEXT_NODE) {
+        let cur = 0;
+        let result: number | null = null;
+        walkEpubPlainText(root, (text, node) => {
+            if (node === targetNode) {
+                result = cur + Math.max(0, Math.min(text.length, targetOffset));
+                return true;
+            }
+            cur += text.length;
+            return false;
+        });
+        if (result !== null) return result;
+        // targetNode wasn't reached (e.g. it was whitespace-only and
+        // skipped as leading content) - fall through to the general path.
     }
     let cur = 0;
-    let result: number | null = null;
+    let result = 0;
     walkEpubPlainText(root, (text, node) => {
-        if (!node) { cur += text.length; return false; }
-        let startCmp: number;
-        try { startCmp = preRange.comparePoint(node, 0); } catch { startCmp = -1; }
-        if (startCmp > 0) {
-            // This node starts after the target position - the target must
-            // fall at or before everything accumulated so far.
-            result = cur;
-            return true;
-        }
-        let endCmp: number;
-        try { endCmp = preRange.comparePoint(node, text.length); } catch { endCmp = 1; }
-        if (endCmp >= 0) {
-            // The target position falls inside (or right at the end of)
-            // this text node.
-            const within = (node === targetNode) ? Math.max(0, Math.min(text.length, targetOffset)) : text.length;
-            result = cur + within;
+        result = cur;
+        if (node && (node === targetNode || (targetNode.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))) {
             return true;
         }
         cur += text.length;
         return false;
     });
-    return result !== null ? result : cur;
+    return result;
 }
 
 // EPUB-specific equivalent of applyLiveRangeHighlight below, built on
@@ -971,21 +947,11 @@ function insertEpubAnnotationMarker(root: HTMLElement, charIndex: number, label:
         const isDarkTheme = typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
         const bg = isDarkTheme ? 'hsl(18, 56%, 65%)' : 'hsl(18, 56%, 75%)';
         const fg = isDarkTheme ? 'hsl(25, 25%, 10%)' : 'hsl(25, 25%, 15%)';
-        // `!important` on every box/text property here: EPUB stylesheets
-        // routinely style `sup` broadly for real footnote markers (padding,
-        // borders, their own line-height), and since that CSS lives in the
-        // same document as this marker (unlike the app's own Tailwind
-        // classes, which never reach in here at all), those rules can win
-        // over a plain inline style and throw off the circle's sizing or
-        // push the number off-center.
-        marker.style.cssText = 'all:initial !important;box-sizing:border-box !important;' +
-            'display:inline-flex !important;align-items:center !important;justify-content:center !important;' +
-            'padding:0 !important;border:none !important;width:16px !important;height:16px !important;' +
-            'min-width:16px !important;max-width:16px !important;border-radius:9999px !important;' +
-            'line-height:16px !important;text-align:center !important;font-size:10px !important;' +
-            'font-family:sans-serif !important;font-weight:600 !important;cursor:pointer !important;' +
-            'margin:0 2px !important;vertical-align:super !important;user-select:none !important;' +
-            `background:${bg} !important;color:${fg} !important;`;
+        marker.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;' +
+            'box-sizing:border-box;padding:0;width:16px;height:16px;min-width:16px;' +
+            'border-radius:9999px;line-height:16px;text-align:center;font-size:10px;' +
+            'font-family:sans-serif;font-weight:600;cursor:pointer;margin:0 2px;' +
+            `vertical-align:super;user-select:none;background:${bg};color:${fg};`;
         marker.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
         range.insertNode(marker);
     } catch { /* skip this annotation rather than crash the whole pass */ }

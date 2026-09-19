@@ -228,6 +228,49 @@ type SelectionForAnnotation = {
   startIndex: number;
 } | null;
 
+// epub.js can have MULTIPLE chapters/sections mounted as separate iframes at
+// once - not just in continuous-scroll mode (the app's default), where
+// adjacent chapters can be appended above/below the current one as the user
+// scrolls, but even in paginated mode epub.js may keep neighboring sections
+// pre-rendered. rendition.getContents() returns every one of those, in
+// mount order, not visibility order - so blindly using getContents()?.[0]
+// (as this file used to, in several places) silently picks whichever
+// chapter happened to mount first, not whichever one is actually on screen.
+// That's harmless for the very first chapter of a book, which is why it
+// wasn't obvious immediately, but breaks completely as soon as a second
+// chapter is visible: a selection made in that chapter's iframe was never
+// found (getSelectedText only ever looked in contents[0]'s window), and
+// even when it happened to be found, its startIndex was computed against
+// the wrong chapter's text entirely, producing nonsense offsets against
+// currentTextForTTS.
+//
+// rendition.manager.visible() (used internally by epub.js's own
+// currentLocation() tracking) returns only the view(s) actually in the
+// viewport right now, in top-to-bottom order - exactly what both "which
+// chapter is the user looking at/selecting text in" and "which chapter
+// should currentTextForTTS represent" should be based on instead.
+function getEpubVisibleContentsList(rendition: Rendition | null | undefined): any[] {
+    if (!rendition) return [];
+    try {
+        const manager = (rendition as any).manager;
+        const visibleViews: any[] | undefined = manager?.visible?.();
+        if (visibleViews && visibleViews.length > 0) {
+            const contentsList = visibleViews.map((v) => v?.contents).filter(Boolean);
+            if (contentsList.length > 0) return contentsList;
+        }
+    } catch { /* fall through to the getContents() fallback below */ }
+    try {
+        // epub.js's own type declarations claim this returns a single
+        // Contents, but at runtime (see managers/default/index.js) it's
+        // always an array of every mounted view's Contents - same mismatch
+        // the pre-existing getContents()?.[0] call sites already had to
+        // work around.
+        return (rendition.getContents?.() as unknown as any[]) || [];
+    } catch {
+        return [];
+    }
+}
+
 function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobile: boolean | undefined }) {
   const { toast } = useToast();
   const router = useRouter();
@@ -858,22 +901,34 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
 
     if (activeDoc?.type === 'epub' && epubRenditionRef.current) {
         try {
-            const epubWindow = epubRenditionRef.current.getContents()?.[0]?.window;
-            const epubSelection = epubWindow?.getSelection();
-            if (epubWindow && epubSelection && epubSelection.toString() && epubSelection.rangeCount) {
-                // A selection made directly in the EPUB page (rather than
-                // in the "收缩TTS区域" box) always used to come back with
-                // startIndex: null, since it lives in the chapter iframe's
-                // own document, not the plain currentTextForTTS string -
-                // and a null startIndex is exactly what made "add
-                // annotation" reject the selection ("selectionErrorDesc")
-                // and made repeat-play fall back to a text-only replay with
-                // no highlight range. Compute it the same way
-                // getSelectionDetails does for the other formats, just
-                // against the iframe's own body - processEpubView derives
-                // currentTextForTTS from that same body's innerText, so the
-                // offsets line up closely (any small drift is absorbed by
-                // the context-based annotation matching already in place).
+            // A selection made directly in the EPUB page (rather than in
+            // the "收缩TTS区域" box) always used to come back with
+            // startIndex: null, since it lives in a chapter iframe's own
+            // document, not the plain currentTextForTTS string - and a null
+            // startIndex is exactly what made "add annotation" reject the
+            // selection ("selectionErrorDesc") and made repeat-play fall
+            // back to a text-only replay with no highlight range.
+            //
+            // getContents()?.[0] used to be assumed to be "the" EPUB
+            // iframe, but with more than one chapter mounted (continuous
+            // scroll routinely has this, and even paginated mode can) that
+            // index is whichever chapter happened to mount first, not
+            // necessarily the one actually visible/being selected in - so a
+            // selection made in any chapter other than the very first one
+            // was silently never found at all. Check every *visible*
+            // chapter's iframe instead and use whichever one actually has a
+            // selection.
+            for (const contents of getEpubVisibleContentsList(epubRenditionRef.current)) {
+                const epubWindow = contents?.window;
+                const epubSelection = epubWindow?.getSelection?.();
+                if (!epubWindow || !epubSelection || !epubSelection.toString() || !epubSelection.rangeCount) {
+                    continue;
+                }
+                // Compute the offset the same way getSelectionDetails does
+                // for the other formats, just against this iframe's own
+                // body - processEpubView derives currentTextForTTS from
+                // that same (visible, first) chapter's body innerText, so
+                // the offsets line up as long as this is that same chapter.
                 const container = epubWindow.document.body;
                 const range = epubSelection.getRangeAt(0);
                 if (container && container.contains(range.startContainer)) {
@@ -1207,7 +1262,13 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                           setEpubCurrentPageNum(pageNum);
                       }
                       
-                      processEpubView(epubRenditionRef.current?.getContents()?.[0]);
+                      // The first *visible* chapter (not just the first
+                      // mounted one - see getEpubVisibleContentsList) is
+                      // what currentTextForTTS should represent, so that
+                      // selections/annotations/highlighting made in that
+                      // same chapter compute offsets against the matching
+                      // text.
+                      processEpubView(getEpubVisibleContentsList(epubRenditionRef.current)[0]);
                   });
                   
                   generateEpubPagination(book);
@@ -1925,7 +1986,11 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (activeDoc?.type !== 'epub') return;
     const rendition = epubRenditionRef.current;
     if (!rendition) return;
-    const contents = rendition.getContents?.()?.[0];
+    // Same reasoning as getSelectedText/processEpubView above: this needs
+    // to be the chapter currentTextForTTS was actually derived from (the
+    // first *visible* one), not just whichever chapter epub.js happened to
+    // mount first.
+    const contents = getEpubVisibleContentsList(rendition)[0];
     const body: HTMLElement | undefined = contents?.document?.body;
     if (!body) return;
 

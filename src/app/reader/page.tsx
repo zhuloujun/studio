@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, useContext, Suspense } from 'react';
@@ -47,6 +46,7 @@ import {
 
 import { getCloudSpeech, performOCR } from '@/app/actions';
 import * as LocalStorageService from '@/lib/localStorageService';
+import { saveFavoriteItemRemote, saveNoteFavoriteRemote } from '@/lib/authService';
 import * as IndexedDBService from '@/lib/indexedDBService';
 import { initMobiFile, type Mobi, type MobiSpine, type MobiTocItem } from '@lingo-reader/mobi-parser';
 import type { TTSSettings, TTSVoice, StoredMangaDocument, ActiveMangaDocument, StoredPdfDocument, StoredImageDocument, StoredEpubDocument, StoredTxtDocument, StoredMobiDocument, FavoriteItem, Annotation, NoteFavoriteItem } from '@/types';
@@ -185,6 +185,11 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [isPaused, setIsPaused] = useState(false);
   const [speechOrigin, setSpeechOrigin] = useState<SpeechOrigin>(null);
   const [highlightedSegmentIndex, setHighlightedSegmentIndex] = useState<number>(-1);
+  // For the "repeat playback" (重复播放) button: highlights the exact
+  // selected character range within currentTextForTTS, since a manual
+  // selection rarely lines up with the sentence-level textSegments used
+  // for normal playback highlighting.
+  const [manualHighlightRange, setManualHighlightRange] = useState<{ start: number; end: number } | null>(null);
   const [ttsTextSize, setTtsTextSize] = useState<number>(LocalStorageService.loadTtsTextSize());
   const [ttsAreaState, setTtsAreaState] = useState<TtsAreaState>('hidden');
   const [isEditingTtsText, setIsEditingTtsText] = useState(false);
@@ -462,6 +467,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     }
     if (resetUIState && isMountedRef.current) {
       setIsSpeaking(false); setIsPaused(false); setIsLoadingTTS(false); setSpeechOrigin(null);
+      setManualHighlightRange(null);
     }
   }, []);
 
@@ -1115,12 +1121,21 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
   useEffect(() => {
     let player = new Audio(); 
     audioPlayerRef.current = player;
-    const handleAudioEnded = () => { 
+    const handleAudioEnded = () => {
         if (audioPlayerRef.current === player && isSpeaking && isMountedRef.current) {
           if (ttsSettings.engine === 'local') {
           } else if (ttsSettings.engine === 'cloud' && isSpeakingRef.current) {
-            segmentIndexRef.current++;
-            if (isMountedRef.current) _startSpeech('main', 0, true); 
+            if (speechOrigin === 'repeat') {
+              // A one-off "repeat playback" clip finished - just clear the
+              // highlight/speaking state, don't continue into main playback.
+              isSpeakingRef.current = false;
+              setIsSpeaking(false);
+              setSpeechOrigin(null);
+              setManualHighlightRange(null);
+            } else {
+              segmentIndexRef.current++;
+              if (isMountedRef.current) _startSpeech('main', 0, true);
+            }
           }
         }
     };
@@ -1134,7 +1149,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
         player = null;
         if (audioPlayerRef.current === player) audioPlayerRef.current = null;
     };
-  }, [ttsSettings.engine, isSpeaking, stopSpeech, toast, readerDict.audioError, readerDict.failedToPlay]);
+  }, [ttsSettings.engine, isSpeaking, speechOrigin, stopSpeech, toast, readerDict.audioError, readerDict.failedToPlay]);
   
   const HighlightableContent = React.forwardRef<HTMLDivElement, {
     text: string;
@@ -1145,7 +1160,11 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     className?: string;
     children?: React.ReactNode;
     isHtml?: boolean;
-}>(({ text, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, className, children, isHtml }, ref) => {
+    // When set (during "repeat playback" of a manual selection), highlights
+    // this exact [start, end) character range in `text` instead of the
+    // sentence-level segment used for normal playback.
+    manualHighlightRange?: { start: number; end: number } | null;
+}>(({ text, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, className, children, isHtml, manualHighlightRange }, ref) => {
     if (isHtml) {
         // MOBI is now paginated by chapter (via the mobi-parser library's
         // spine/TOC), not by pixel-width CSS columns - so it renders as a
@@ -1166,7 +1185,21 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     }
 
     let content;
-    if (isSpeaking || isPaused) {
+    if (manualHighlightRange && (isSpeaking || isPaused)) {
+        const { start, end } = manualHighlightRange;
+        if (start < 0 || end <= start || start >= text.length) {
+            content = <>{text}</>;
+        } else {
+            const safeEnd = Math.min(end, text.length);
+            content = (
+                <>
+                    {text.slice(0, start)}
+                    <span className="text-green-600 bg-green-600/10">{text.slice(start, safeEnd)}</span>
+                    {text.slice(safeEnd)}
+                </>
+            );
+        }
+    } else if (isSpeaking || isPaused) {
         if (highlightedSegmentIndex < 0 || !textSegments[highlightedSegmentIndex]) {
             content = <>{text}</>;
         } else {
@@ -1341,22 +1374,41 @@ HighlightableContent.displayName = 'HighlightableContent';
     }
   }, [ttsSettings, stopSpeech, toast, textSegments, currentTextForTTS, readerDict, isSpeaking]);
 
-  const speakTextOnce = useCallback(async (text: string) => {
-    stopSpeech(true); 
+  const speakTextOnce = useCallback(async (text: string, range?: { start: number; end: number } | null) => {
+    stopSpeech(true);
 
     const cleanedText = text.replace(PUNCTUATION_REGEX, ' ').trim();
     if (!cleanedText) {
         toast({ title: 'No Text to Speak', description: 'Your selection contains only punctuation.' });
         return;
     }
-    
+
     lastSpokenTextRef.current = cleanedText;
     setIsLoadingTTS(true);
+    // Drive the same isSpeaking/isPaused/speechOrigin state main playback
+    // uses, so the reading area shows the same green highlight - but with
+    // an explicit character range (rather than a segment index) since a
+    // manual selection rarely lines up with sentence-level textSegments.
+    setSpeechOrigin('repeat');
+    setIsSpeaking(true);
+    isSpeakingRef.current = true;
+    setIsPaused(false);
+    isPausedRef.current = false;
+    setManualHighlightRange(range ?? null);
+
+    const finishRepeat = () => {
+        if (!isMountedRef.current) return;
+        setIsLoadingTTS(false);
+        setIsSpeaking(false);
+        isSpeakingRef.current = false;
+        setSpeechOrigin(null);
+        setManualHighlightRange(null);
+    };
 
     if (ttsSettings.engine === 'local') {
         if (typeof window === 'undefined' || !window.speechSynthesis) {
             toast({ variant: "destructive", title: readerDict.ttsError, description: readerDict.browserNotSupported });
-            setIsLoadingTTS(false); return;
+            finishRepeat(); return;
         }
         const utterance = new SpeechSynthesisUtterance(cleanedText);
         utterance.lang = ttsSettings.language;
@@ -1367,29 +1419,33 @@ HighlightableContent.displayName = 'HighlightableContent';
             const systemVoice = window.speechSynthesis.getVoices().find(v => v.voiceURI === voiceToUse.voiceURI);
             if (systemVoice) utterance.voice = systemVoice;
         }
-        utterance.onend = () => { if(isMountedRef.current) setIsLoadingTTS(false); };
+        utterance.onend = () => { if (utteranceRef.current === utterance) finishRepeat(); };
         utterance.onerror = (event) => {
-            if (isMountedRef.current && event.error !== 'canceled' && event.error !== 'interrupted') {
+            if (utteranceRef.current === utterance && isMountedRef.current && event.error !== 'canceled' && event.error !== 'interrupted') {
                 toast({ variant: "destructive", title: readerDict.ttsError, description: event.error || "Speech failed." });
-                setIsLoadingTTS(false);
             }
+            if (utteranceRef.current === utterance) finishRepeat();
         };
+        utteranceRef.current = utterance;
         setTimeout(() => { if(isMountedRef.current) window.speechSynthesis.speak(utterance); }, 50);
-    } else { 
+    } else {
       try {
         const result = await getCloudSpeech(cleanedText, ttsSettings.language, ttsSettings.cloudVoiceId);
         if (!isMountedRef.current) return;
         if ('audioUrl' in result && audioPlayerRef.current) {
           audioPlayerRef.current.src = result.audioUrl;
           await audioPlayerRef.current.play();
+          // isLoadingTTS is cleared by the 'playing' listener, and
+          // isSpeaking/speechOrigin/manualHighlightRange are cleared by the
+          // 'ended' listener (both set up in the audio element effect).
         } else if ('error' in result) {
           toast({ variant: "destructive", title: readerDict.cloudTtsError, description: result.error });
+          finishRepeat();
         }
       } catch (error: any) {
         if (!isMountedRef.current) return;
         toast({ variant: "destructive", title: readerDict.cloudTtsFailed, description: error.message });
-      } finally {
-        if (isMountedRef.current) setIsLoadingTTS(false);
+        finishRepeat();
       }
     }
   }, [ttsSettings, availableVoices, stopSpeech, toast, readerDict.ttsError, readerDict.browserNotSupported, readerDict.cloudTtsError, readerDict.cloudTtsFailed]);
@@ -1479,7 +1535,7 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (textToFavorite) {
       const sourceName = activeDoc ? activeDoc.title : readerDict.scratchpad;
       const sourceId = activeDoc ? activeDoc.id : 'scratchpad';
-      LocalStorageService.addFavoriteItem({
+      saveFavoriteItemRemote({
         id: Date.now().toString(),
         text: textToFavorite,
         sourceDocumentId: sourceId,
@@ -1595,8 +1651,8 @@ HighlightableContent.displayName = 'HighlightableContent';
 
     if (isSpeaking && speechOrigin === 'main') {
       return isPaused 
-        ? { text: readerDict.resume, icon: <Play className="h-4 w-4" />, disabled: false, variant: "default" as const, title: readerDict.resume } 
-        : { text: readerDict.pause, icon: <Pause className="h-4 w-4" />, disabled: false, variant: "outline" as const, title: readerDict.pause };
+        ? { text: readerDict.resume, icon: <Play className="h-4 w-4" />, disabled: false, variant: "default" as const, title: readerDict.resume }
+        : { text: readerDict.pause, icon: <Pause className="h-4 w-4 text-blue-500" />, disabled: false, variant: "outline" as const, title: readerDict.pause };
     }
     
     if (typeof window !== 'undefined' && window.getSelection()?.toString().trim().length) {
@@ -1791,7 +1847,7 @@ HighlightableContent.displayName = 'HighlightableContent';
       sourceDocumentName: activeDoc?.title || readerDict.scratchpad,
       favoritedAt: Date.now(),
     }
-    LocalStorageService.saveNoteFavorite(noteFavorite);
+    saveNoteFavoriteRemote(noteFavorite);
     toast({ title: readerDict.noteFavorited, description: readerDict.noteFavoritedDesc });
   };
   
@@ -1918,6 +1974,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                     highlightedSegmentIndex={highlightedSegmentIndex}
                     isSpeaking={isSpeaking}
                     isPaused={isPaused}
+                    manualHighlightRange={manualHighlightRange}
                 >
                     <AnnotationMarkers containerRef={mainHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
                 </HighlightableContent>
@@ -1997,6 +2054,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                     highlightedSegmentIndex={highlightedSegmentIndex}
                     isSpeaking={isSpeaking}
                     isPaused={isPaused}
+                    manualHighlightRange={manualHighlightRange}
                 >
                     <AnnotationMarkers containerRef={mainHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
                 </HighlightableContent>
@@ -2178,6 +2236,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                                 highlightedSegmentIndex={highlightedSegmentIndex}
                                 isSpeaking={isSpeaking}
                                 isPaused={isPaused}
+                                manualHighlightRange={manualHighlightRange}
                                 isHtml={false} // TTS area should always be plain text
                             >
                                <AnnotationMarkers containerRef={ttsBoxHighlightedContentRef} annotations={sortedAnnotations} text={currentTextForTTS} />
@@ -2217,62 +2276,72 @@ HighlightableContent.displayName = 'HighlightableContent';
                     <Button 
                         onClick={playPauseSpeech} 
                         disabled={mainButtonState.disabled || isEditingTtsText} 
-                        variant={mainButtonState.variant} 
+                        variant={mainButtonState.variant}
                         size="icon"
-                        className="h-9 w-9"
+                        className={cn("h-9 w-9", mainButtonState.variant === "outline" && "border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950")}
                         title={mainButtonState.title}
                     >
                         {mainButtonState.icon}
                     </Button>
-                    <Button onClick={handleFavoriteSelection} variant="outline" size="icon" className="h-9 w-9" title={readerDict.favorite} disabled={isEditingTtsText}>
-                        <Star className="h-4 w-4" />
+                    <Button onClick={handleFavoriteSelection} variant="outline" size="icon" className="h-9 w-9 border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950" title={readerDict.favorite} disabled={isEditingTtsText}>
+                        <Star className="h-4 w-4 text-amber-500" />
                     </Button>
                     <Button 
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => {
                             const selection = getSelectedText();
-                            const textToSpeak = selection.text.trim() || lastSpokenTextRef.current;
+                            const trimmedSelection = selection.text.trim();
+                            const textToSpeak = trimmedSelection || lastSpokenTextRef.current;
                             if (textToSpeak) {
-                                speakTextOnce(textToSpeak);
+                                // Only a live selection (with a known offset into the
+                                // reading text) can be highlighted precisely; the
+                                // lastSpokenTextRef fallback has no reliable position.
+                                let range: { start: number; end: number } | null = null;
+                                if (trimmedSelection && selection.startIndex !== null) {
+                                    const leadingWhitespace = selection.text.length - selection.text.trimStart().length;
+                                    const start = selection.startIndex + leadingWhitespace;
+                                    range = { start, end: start + trimmedSelection.length };
+                                }
+                                speakTextOnce(textToSpeak, range);
                             } else {
                                 toast({ title: readerDict.noSelection, description: readerDict.selectToRepeat });
                             }
                         }}
-                        variant="outline" 
-                        size="icon" 
-                        className="h-9 w-9"
+                        variant="outline"
+                        size="icon"
+                        className="h-9 w-9 border-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950"
                         disabled={isLoadingTTS || isEditingTtsText}
                         title={readerDict.repeat}
-                    > 
-                        <Repeat className="h-4 w-4" />
+                    >
+                        <Repeat className="h-4 w-4 text-purple-500" />
                     </Button>
                     <Button
                         onClick={handleToggleTtsArea}
                         size="icon"
                         variant="outline"
-                        className="h-9 w-9"
+                        className="h-9 w-9 border-teal-400 hover:bg-teal-50 dark:hover:bg-teal-950"
                         title={getTtsAreaTitle()}
                     >
-                        {getTtsAreaIcon()}
+                        {React.cloneElement(getTtsAreaIcon(), { className: "h-4 w-4 text-teal-500" })}
                     </Button>
                     <Button
                         onClick={handleOpenAnnotationDialog}
                         size="icon"
                         variant="outline"
-                        className="h-9 w-9"
+                        className="h-9 w-9 border-pink-400 hover:bg-pink-50 dark:hover:bg-pink-950"
                         title={readerDict.addAnnotation}
                         disabled={isEditingTtsText}
                     >
-                        <MessageSquarePlus className="h-4 w-4" />
+                        <MessageSquarePlus className="h-4 w-4 text-pink-500" />
                     </Button>
                     <Button
                         onClick={handleEditTtsText}
                         size="icon"
                         variant={isEditingTtsText ? "default" : "outline"}
-                        className="h-9 w-9"
+                        className={isEditingTtsText ? "h-9 w-9" : "h-9 w-9 border-orange-400 hover:bg-orange-50 dark:hover:bg-orange-950"}
                         title={isEditingTtsText ? "Confirm Changes" : "Edit TTS Text"}
                     >
-                        {isEditingTtsText ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+                        {isEditingTtsText ? <Check className="h-4 w-4" /> : <Pencil className="h-4 w-4 text-orange-500" />}
                     </Button>
                     {((activeDoc?.type === 'pdf' && !isPdfTextView && pdfPageImage && !isRenderingPdfPage && !pdfPageIsTextBased) || 
                       (activeDoc?.type === 'image' && displayedImageSrc && !isLoadingDoc) || 
@@ -2282,17 +2351,17 @@ HighlightableContent.displayName = 'HighlightableContent';
                             disabled={isPerformingOcr || isEditingTtsText}
                             size="icon"
                             variant="outline"
-                            className="h-9 w-9"
+                            className="h-9 w-9 border-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-950"
                             title={activeDoc?.type === 'image' ? readerDict.ocrImage : readerDict.ocrPage}
                         >
-                            {isPerformingOcr ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanText className="h-4 w-4" />}
+                            {isPerformingOcr ? <Loader2 className="h-4 w-4 animate-spin text-cyan-500" /> : <ScanText className="h-4 w-4 text-cyan-500" />}
                         </Button>
                     )}
                     {(activeDoc?.type === 'epub' && epubToc.length > 0 || activeDoc?.type === 'mobi' && mobiToc.length > 0) && (
                         <Popover open={isTocOpen} onOpenChange={setIsTocOpen}>
                             <PopoverTrigger asChild>
-                                <Button variant="outline" size="icon" className="h-9 w-9" title="Table of Contents">
-                                    <ListTree className="h-4 w-4" />
+                                <Button variant="outline" size="icon" className="h-9 w-9 border-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950" title="Table of Contents">
+                                    <ListTree className="h-4 w-4 text-indigo-500" />
                                 </Button>
                             </PopoverTrigger>
                             <PopoverContent className="w-80 p-0" align="end">
@@ -2325,8 +2394,8 @@ HighlightableContent.displayName = 'HighlightableContent';
                     )}
                     <Popover>
                         <PopoverTrigger asChild>
-                        <Button variant="outline" size="icon" className="h-9 w-9" title="Document Actions">
-                            <BookOpen className="h-4 w-4" />
+                        <Button variant="outline" size="icon" className="h-9 w-9 border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950" title="Document Actions">
+                            <BookOpen className="h-4 w-4 text-blue-500" />
                             <span className="sr-only">Document Actions</span>
                         </Button>
                         </PopoverTrigger>
@@ -2449,8 +2518,8 @@ HighlightableContent.displayName = 'HighlightableContent';
                     </Popover>
                     <Popover>
                         <PopoverTrigger asChild>
-                            <Button variant="outline" size="icon" className="h-9 w-9" title="Scratchpad Actions">
-                                <FileEdit className="h-4 w-4" />
+                            <Button variant="outline" size="icon" className="h-9 w-9 border-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950" title="Scratchpad Actions">
+                                <FileEdit className="h-4 w-4 text-rose-500" />
                                 <span className="sr-only">Scratchpad Actions</span>
                             </Button>
                         </PopoverTrigger>
@@ -2473,8 +2542,8 @@ HighlightableContent.displayName = 'HighlightableContent';
                     </Popover>
                     <Popover>
                     <PopoverTrigger asChild>
-                        <Button variant="outline" size="icon" className="h-9 w-9">
-                        <Settings2 className="h-4 w-4" />
+                        <Button variant="outline" size="icon" className="h-9 w-9 border-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950" title="TTS Settings">
+                        <Settings2 className="h-4 w-4 text-emerald-500" />
                         <span className="sr-only">TTS Settings</span>
                         </Button>
                     </PopoverTrigger>

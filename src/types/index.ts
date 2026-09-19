@@ -32,6 +32,11 @@ export interface Annotation {
   // depends on nearby words still being nearby - not on offsets lining up.
   contextBefore?: string;
   contextAfter?: string;
+  // Precise EPUB location (epub.js CFI) at the moment this annotation was
+  // created, used to jump straight back to it from the notes-favorites list
+  // - pageNumber alone is only a rough position (rounded from a live
+  // pagination pass that can come out slightly different next time).
+  epubCfi?: string;
 }
 
 // Base for all stored documents
@@ -134,6 +139,14 @@ export interface FavoriteItem {
   sourceDocumentId?: string;
   sourceDocumentName?: string;
   createdAt: number;
+  // Where in the source document this favorite was captured, so the
+  // favorites list can offer a "jump back to it in the reader" button -
+  // interpreted per document type: PDF/EPUB page number, or MOBI/DOCX
+  // chapter index. epubCfi (when present) is preferred for EPUB since it's
+  // an exact location rather than a rounded page number.
+  sourcePageNumber?: number;
+  sourceEpubCfi?: string;
+  sourceChapterIndex?: number;
 }
 
 export interface NoteFavoriteItem {

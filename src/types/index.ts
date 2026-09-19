@@ -1,5 +1,3 @@
-
-
 export interface User {
   email: string;
   passwordHash: string;
@@ -24,6 +22,16 @@ export interface Annotation {
   note: string; // The user's text note
   imageDataUrl?: string; // The optional image for the annotation, as a data URL
   createdAt: number;
+  pageNumber?: number; // Which PDF/EPUB page this annotation belongs to
+  // A short slice of text immediately before/after targetText at the moment
+  // the annotation was created. startIndex alone is fragile across devices:
+  // if the same page's text gets re-extracted slightly differently (or the
+  // page position isn't synced yet), a raw character offset can point at
+  // the wrong occurrence of a common word like "and". Matching against the
+  // actual surrounding text instead is robust to that, since it only
+  // depends on nearby words still being nearby - not on offsets lining up.
+  contextBefore?: string;
+  contextAfter?: string;
 }
 
 // Base for all stored documents
@@ -46,6 +54,14 @@ export interface StoredPdfDocument extends StoredDocumentBase {
   type: 'pdf';
   numPages?: number;
   ocrTextPerPage?: { [pageNumber: number]: string }; // Added to store OCR text per page
+  // The last page read, synced through document metadata (not just
+  // browser localStorage) so reopening the same document on a different
+  // device lands on the same page instead of showing whatever page that
+  // *other* device happened to be on last - previously the reading
+  // position was purely per-browser, which made the reader area look like
+  // it was showing "different content" across devices when really it was
+  // just a different page of the same PDF.
+  lastPdfPageNum?: number;
   // For PDF, text extraction will be on-the-fly in the reader or pre-extracted per page if complex.
   // We won't store all 'processedPages' with image data here to save space in IndexedDB.
   // The reader will generate page images as needed.
@@ -156,5 +172,3 @@ export interface MangaDocumentDisplayInfo {
 }
 
 export type PlaybackMode = 'default' | 'loop-single' | 'sequential';
-
-    

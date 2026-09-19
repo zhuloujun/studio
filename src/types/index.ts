@@ -75,6 +75,13 @@ export interface StoredEpubDocument extends StoredDocumentBase {
 export interface StoredMobiDocument extends StoredDocumentBase {
   type: 'mobi';
   // Now stores HTML content and TOC
+  // Edited TTS-box text per chapter (keyed by spine index), analogous to
+  // ocrTextPerPage for PDFs. Edits to the TTS box must NOT overwrite
+  // fileData for a MOBI: unlike a .txt file, fileData here is the actual
+  // binary MOBI/PalmDB container - replacing it with the edited plain text
+  // (as used to happen) destroys the book's structure entirely, so it can
+  // no longer be parsed/opened at all afterward.
+  mobiTextPerChapter?: { [spineIndex: number]: string };
 }
 
 export interface StoredTxtDocument extends StoredDocumentBase {

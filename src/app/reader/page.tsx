@@ -645,7 +645,10 @@ const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: 
 const sortedAnnotations = useMemo(() => {
     const allAnnotations: Annotation[] = activeDoc?.annotations || scratchpadAnnotations;
     
-    if (activeDoc?.type === 'pdf' && !isPdfTextView) {
+    if (activeDoc?.type === 'pdf') {
+        // Same reasoning as in handleSaveAnnotation: page text (and thus
+        // which annotations belong on it) doesn't depend on image/text
+        // view mode, only on the page number.
         const pageNum = currentPdfPageNum;
         // Filtering by page number alone isn't enough: if the text shown for
         // this page has since changed (OCR replacing extracted text, a
@@ -729,11 +732,30 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     if (activeDoc?.type === 'epub' && epubRenditionRef.current) {
         try {
             const epubWindow = epubRenditionRef.current.getContents()?.[0]?.window;
-            if (epubWindow && epubWindow.getSelection()?.toString()) {
-                const epubSelection = epubWindow.getSelection();
-                if(epubSelection) {
-                  return { text: epubSelection.toString(), startIndex: null };
+            const epubSelection = epubWindow?.getSelection();
+            if (epubWindow && epubSelection && epubSelection.toString() && epubSelection.rangeCount) {
+                // A selection made directly in the EPUB page (rather than
+                // in the "收缩TTS区域" box) always used to come back with
+                // startIndex: null, since it lives in the chapter iframe's
+                // own document, not the plain currentTextForTTS string -
+                // and a null startIndex is exactly what made "add
+                // annotation" reject the selection ("selectionErrorDesc")
+                // and made repeat-play fall back to a text-only replay with
+                // no highlight range. Compute it the same way
+                // getSelectionDetails does for the other formats, just
+                // against the iframe's own body - processEpubView derives
+                // currentTextForTTS from that same body's innerText, so the
+                // offsets line up closely (any small drift is absorbed by
+                // the context-based annotation matching already in place).
+                const container = epubWindow.document.body;
+                const range = epubSelection.getRangeAt(0);
+                if (container && container.contains(range.startContainer)) {
+                    const preSelectionRange = range.cloneRange();
+                    preSelectionRange.selectNodeContents(container);
+                    preSelectionRange.setEnd(range.startContainer, range.startOffset);
+                    return { text: range.toString(), startIndex: preSelectionRange.toString().length };
                 }
+                return { text: epubSelection.toString(), startIndex: null };
             }
         } catch (e) { console.warn("Could not get selection from EPUB iframe", e); }
     }
@@ -2212,7 +2234,12 @@ HighlightableContent.displayName = 'HighlightableContent';
       const { text, startIndex } = selectionForAnnotation;
   
       let pageNum = 1;
-       if (activeDoc?.type === 'pdf' && !isPdfTextView) pageNum = currentPdfPageNum;
+       // currentTextForTTS is the same per-page text regardless of
+       // image/text view mode (switching modes only changes how the page
+       // is *displayed*), so this must not be gated on !isPdfTextView -
+       // that used to tag every annotation added while in text-view mode
+       // as page 1 no matter which page it was actually on.
+       if (activeDoc?.type === 'pdf') pageNum = currentPdfPageNum;
        else if (activeDoc?.type === 'epub') pageNum = epubCurrentPageNum;
 
       // Record the text immediately surrounding this selection so the

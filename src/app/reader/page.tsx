@@ -344,6 +344,18 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   // mousedown preventDefault on the *button* doesn't protect against,
   // unlike a same-document text selection) - this ref survives that.
   const epubLastSelectionRef = useRef<{ text: string; startIndex: number } | null>(null);
+  // The exact chapter <body> element currentTextForTTS was last extracted
+  // from in processEpubView. Playback highlighting and annotation markers
+  // both need to apply their [start, end) offsets to that SAME body - but
+  // re-deriving "the visible chapter" fresh via getEpubVisibleContentsList
+  // each time (as they used to) can pick a *different* chapter than the one
+  // currentTextForTTS actually describes if the visible chapter changes
+  // (even slightly, mid-scroll) between the 'relocated' event that set
+  // currentTextForTTS and the effect that reads it - landing a marker or
+  // highlight in a completely unrelated part of the book. Caching the exact
+  // body alongside the text it was extracted from removes that race
+  // entirely: they can never point at different chapters.
+  const epubActiveBodyRef = useRef<HTMLElement | null>(null);
   const [isEpubPaginating, setIsEpubPaginating] = useState(true);
   const [isEpubReadyForJumping, setIsEpubReadyForJumping] = useState(false);
   const [epubToc, setEpubToc] = useState<any[]>([]); // For EPUB table of contents
@@ -746,22 +758,142 @@ function clearLiveRangeHighlight(root: HTMLElement) {
 // TreeWalker. innerText follows CSS layout rules (line breaks at block
 // boundaries, collapsed whitespace, skipped hidden text) and a plain
 // TreeWalker has no concept of any of that, so the two disagreed more and
-// more the deeper into a chapter an offset pointed - that's what put
-// annotation markers "somewhere else entirely" and made playback highlight
-// and "play from selection" land on the wrong text.
+// more the deeper into a chapter an offset pointed.
 //
-// Two attempts at reconciling that by inserting synthetic paragraph-break
-// characters (matched by an equally custom offset-mapping walk) both made
-// things worse in different ways - either by disagreeing with a selection's
-// own raw offset space, or by being too expensive/fragile to run on every
-// selection change. MOBI/DOCX never had this problem at all, because they
-// build currentTextForTTS from the SAME primitive (`textContent`) that a
-// plain TreeWalker already naturally agrees with - no special-casing
-// needed. EPUB now does exactly the same thing: `contentBody.textContent`
-// instead of `.innerText` in processEpubView (see below), and everywhere
-// else reuses the very same generic, already-proven applyLiveRangeHighlight/
-// wrapHtmlRangeWithHighlight offset-mapping MOBI/DOCX has always used,
-// instead of a parallel EPUB-only implementation.
+// Switching to raw `textContent` (matching MOBI/DOCX, whose HTML - built by
+// our own conversion pipeline - has no incidental whitespace to worry
+// about) fixed the *marker position* drift, but surfaced a different EPUB-
+// only problem: real-world EPUB XHTML is routinely hand/tool-formatted with
+// indentation and mid-paragraph line-wrapping in its markup, and
+// `textContent` preserves every one of those literal newlines/spaces -
+// which the segment-splitting regex (textSegments, which treats a bare
+// "\n" as a clause boundary) then broke playback highlighting on, mid-
+// sentence, wherever the source markup happened to wrap a line, instead of
+// at actual punctuation.
+//
+// The fix is the same shape as MOBI/DOCX's own text (which also has no
+// paragraph-break characters) but with incidental whitespace collapsed the
+// way normal (non-`white-space:pre`) HTML rendering does - a run of
+// spaces/tabs/newlines becomes a single space - using one shared,
+// mechanical (not DOM-structure-dependent) algorithm for both building the
+// text and mapping an offset in it back to the DOM, so the two can never
+// drift apart. This is deliberately much simpler than an earlier attempt
+// that tried to detect "paragraph boundaries" from DOM/CSS structure (which
+// was itself a source of bugs) - plain character-level whitespace
+// collapsing needs no judgment calls about the surrounding markup at all.
+function collapseEpubWhitespace(text: string): string {
+    return text.replace(/[ \t\r\n\f]+/g, ' ').trim();
+}
+
+function extractEpubPlainText(root: HTMLElement): string {
+    return collapseEpubWhitespace(root.textContent || '');
+}
+
+// The inverse of extractEpubPlainText: given a character offset into the
+// (whitespace-collapsed) string that function returns for `root`, finds
+// the real DOM node/offset that character actually lives at.
+function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Text; offset: number } | null {
+    if (charIndex < 0) return null;
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let collapsed = 0;
+    let pendingSpace = false;
+    let started = false;
+    let node: Node | null;
+    let lastReal: { node: Text; offset: number } | null = null;
+    while ((node = walker.nextNode())) {
+        const textNode = node as Text;
+        const data = textNode.data;
+        for (let i = 0; i < data.length; i++) {
+            const ch = data[i];
+            if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n' || ch === '\f') {
+                if (started) pendingSpace = true;
+                continue;
+            }
+            if (pendingSpace) {
+                if (collapsed === charIndex) return { node: textNode, offset: i };
+                collapsed++;
+                pendingSpace = false;
+            }
+            started = true;
+            if (collapsed === charIndex) return { node: textNode, offset: i };
+            lastReal = { node: textNode, offset: i };
+            collapsed++;
+        }
+    }
+    // charIndex is at (or past) the end - snap to just after the last real
+    // character found, rather than failing outright.
+    if (lastReal) return { node: lastReal.node, offset: lastReal.offset + 1 };
+    return null;
+}
+
+// The other direction: given a live selection's (startContainer,
+// startOffset) inside `root`, returns that position's offset into
+// extractEpubPlainText(root)'s (collapsed) string - needed because a
+// selection's own offset used to be computed as a raw, uncollapsed
+// Range.toString().length, which would drift out of sync with the
+// collapsed currentTextForTTS by one character for every run of
+// incidental whitespace collapsed before the selection. A single linear
+// scan, same shape as findEpubTextPosition - no Range.comparePoint or
+// getComputedStyle calls (an earlier attempt at this exact fix used those
+// per DOM node on every 'selectionchange' event, which was slow and
+// fragile enough to break selection outright; this is neither).
+function epubDomPositionToTextOffset(root: HTMLElement, targetNode: Node, targetOffset: number): number {
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const targetIsText = targetNode.nodeType === Node.TEXT_NODE;
+    let collapsed = 0;
+    let pendingSpace = false;
+    let started = false;
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+        const textNode = node as Text;
+        const isTarget = targetIsText && textNode === targetNode;
+        const reachedElementTarget = !targetIsText && targetNode !== textNode &&
+            (targetNode.compareDocumentPosition(textNode) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+        const data = textNode.data;
+        const limit = isTarget ? Math.max(0, Math.min(data.length, targetOffset)) : (reachedElementTarget ? 0 : data.length);
+        for (let i = 0; i < limit; i++) {
+            const ch = data[i];
+            if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n' || ch === '\f') {
+                if (started) pendingSpace = true;
+                continue;
+            }
+            if (pendingSpace) { collapsed++; pendingSpace = false; }
+            started = true;
+            collapsed++;
+        }
+        if (isTarget || reachedElementTarget) return collapsed;
+    }
+    return collapsed;
+}
+
+// EPUB-specific equivalent of applyLiveRangeHighlight below, built on
+// findEpubTextPosition so its offsets stay in the same (collapsed) space
+// as currentTextForTTS. (applyLiveRangeHighlight itself is untouched and
+// still used for MOBI/DOCX, whose text has no incidental whitespace to
+// collapse in the first place.)
+function applyEpubRangeHighlight(root: HTMLElement, start: number, end: number): HTMLElement | null {
+    if (start < 0 || end <= start) return null;
+    const doc = root.ownerDocument;
+    try {
+        const startPos = findEpubTextPosition(root, start);
+        const endPos = findEpubTextPosition(root, end);
+        if (!startPos || !endPos) return null;
+        const range = doc.createRange();
+        range.setStart(startPos.node, startPos.offset);
+        range.setEnd(endPos.node, endPos.offset);
+        const span = doc.createElement('span');
+        span.className = 'text-green-600 bg-green-600/10';
+        span.style.color = '#16a34a';
+        span.style.backgroundColor = 'rgba(22, 163, 74, 0.1)';
+        span.setAttribute('data-highlight-target', 'true');
+        range.surroundContents(span);
+        return span;
+    } catch {
+        return null;
+    }
+}
 
 // EPUB's main view has no AnnotationMarkers overlay at all (that component
 // positions markers with absolute CSS in the *parent* document, which can't
@@ -771,9 +903,8 @@ function clearLiveRangeHighlight(root: HTMLElement) {
 // over the iframe, this inserts small clickable marker elements directly
 // INTO the chapter iframe's own document, right at each annotation's
 // resolved position - sidestepping the cross-frame positioning problem
-// entirely. Offsets are into `root.textContent` (see the note above), so
-// this is a plain TreeWalker over raw text nodes, same as
-// applyLiveRangeHighlight below.
+// entirely, using findEpubTextPosition (see above) to land on the correct
+// character.
 function clearEpubAnnotationMarkers(root: HTMLElement) {
     try {
         root.querySelectorAll('[data-annotation-marker="true"]').forEach((el) => el.remove());
@@ -784,22 +915,10 @@ function insertEpubAnnotationMarker(root: HTMLElement, charIndex: number, label:
     if (charIndex < 0) return;
     const doc = root.ownerDocument;
     try {
-        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        let cur = 0;
-        let node: Node | null;
-        let target: { textNode: Text; offset: number } | null = null;
-        while ((node = walker.nextNode())) {
-            const textNode = node as Text;
-            const len = textNode.data.length;
-            if (cur + len >= charIndex) {
-                target = { textNode, offset: Math.max(0, Math.min(len, charIndex - cur)) };
-                break;
-            }
-            cur += len;
-        }
+        const target = findEpubTextPosition(root, charIndex);
         if (!target) return;
         const range = doc.createRange();
-        range.setStart(target.textNode, target.offset);
+        range.setStart(target.node, target.offset);
         range.collapse(true);
         const marker = doc.createElement('sup');
         marker.textContent = label;
@@ -1036,20 +1155,14 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 if (!epubWindow || !epubSelection || !epubSelection.toString() || !epubSelection.rangeCount) {
                     continue;
                 }
-                // Compute the offset the same way getSelectionDetails does
-                // for the other formats, just against this iframe's own
-                // body - processEpubView now derives currentTextForTTS from
-                // that same (visible, first) chapter's body.textContent
-                // (not innerText), which is the same primitive
-                // Range.toString() concatenates, so this offset already
-                // agrees with it without any extra translation.
+                // The offset must be computed in the same (whitespace-
+                // collapsed) space currentTextForTTS/findEpubTextPosition
+                // use - see epubDomPositionToTextOffset above.
                 const container = epubWindow.document.body;
                 const range = epubSelection.getRangeAt(0);
                 if (container && container.contains(range.startContainer)) {
-                    const preSelectionRange = range.cloneRange();
-                    preSelectionRange.selectNodeContents(container);
-                    preSelectionRange.setEnd(range.startContainer, range.startOffset);
-                    return { text: range.toString(), startIndex: preSelectionRange.toString().length };
+                    const startIndex = epubDomPositionToTextOffset(container, range.startContainer, range.startOffset);
+                    return { text: range.toString(), startIndex };
                 }
                 return { text: epubSelection.toString(), startIndex: null };
             }
@@ -1150,6 +1263,9 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
 
     try {
         const contentBody = view.document.body;
+        // See epubActiveBodyRef's declaration - keep it pointing at exactly
+        // the body currentTextForTTS is about to be (re)computed from.
+        epubActiveBodyRef.current = contentBody;
         const imageElement = contentBody.querySelector('img') || contentBody.querySelector('image');
 
         if (imageElement) {
@@ -1163,20 +1279,17 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 imageElement.onerror = () => {
                     if (!isMountedRef.current) return;
                     epubImageForOcrRef.current = null;
-                    // textContent, not innerText - see the note above
-                    // insertEpubAnnotationMarker: this needs to agree with a
-                    // plain TreeWalker over raw text nodes, which is what
-                    // every offset computed from this string later gets
-                    // mapped back through (same primitive MOBI/DOCX already
-                    // uses via DOMParser().body.textContent).
-                    const pageText = (contentBody.textContent || "").trim();
+                    // See extractEpubPlainText's comment above - must agree
+                    // with findEpubTextPosition, which every offset computed
+                    // from this string later gets mapped back through.
+                    const pageText = extractEpubPlainText(contentBody);
                     setCurrentTextForTTS(pageText || "Could not load image. No fallback text found.");
                     setEpubPageIsImage(false);
                 };
             }
         } else {
             epubImageForOcrRef.current = null;
-            const pageText = (contentBody.textContent || "").trim();
+            const pageText = extractEpubPlainText(contentBody);
             if (isMountedRef.current) {
                 setCurrentTextForTTS(pageText || "This page has no text or image content.");
                 setEpubPageIsImage(false);
@@ -1354,10 +1467,11 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                       try {
                           const range = sel.getRangeAt(0);
                           if (!body.contains(range.startContainer)) return;
-                          const preSelectionRange = range.cloneRange();
-                          preSelectionRange.selectNodeContents(body);
-                          preSelectionRange.setEnd(range.startContainer, range.startOffset);
-                          epubLastSelectionRef.current = { text: range.toString(), startIndex: preSelectionRange.toString().length };
+                          // See epubDomPositionToTextOffset's comment above -
+                          // must stay in the same (whitespace-collapsed)
+                          // offset space as currentTextForTTS.
+                          const startIndex = epubDomPositionToTextOffset(body, range.startContainer, range.startOffset);
+                          epubLastSelectionRef.current = { text: range.toString(), startIndex };
                       } catch { /* keep the previous value on failure */ }
                   };
 
@@ -2138,13 +2252,14 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (activeDoc?.type !== 'epub') return;
     const rendition = epubRenditionRef.current;
     if (!rendition) return;
-    // Same reasoning as getSelectedText/processEpubView above: this needs
-    // to be the chapter currentTextForTTS was actually derived from (the
-    // first *visible* one), not just whichever chapter epub.js happened to
-    // mount first.
-    const contents = getEpubVisibleContentsList(rendition)[0];
-    const body: HTMLElement | undefined = contents?.document?.body;
-    if (!body) return;
+    // Must be the EXACT body currentTextForTTS was extracted from (see
+    // epubActiveBodyRef's declaration) - re-deriving "the visible chapter"
+    // fresh here could pick a different one than currentTextForTTS
+    // describes if the visible chapter shifted between the 'relocated'
+    // event that set currentTextForTTS and this effect running.
+    const body = epubActiveBodyRef.current;
+    if (!body || !body.isConnected) return;
+    const epubWindow = body.ownerDocument?.defaultView;
 
     clearLiveRangeHighlight(body);
 
@@ -2160,7 +2275,7 @@ HighlightableContent.displayName = 'HighlightableContent';
     }
     if (!range) return;
 
-    const span = applyLiveRangeHighlight(body, range.start, range.end);
+    const span = applyEpubRangeHighlight(body, range.start, range.end);
     if (span) {
         // `span.getBoundingClientRect()` is relative to the chapter
         // iframe's OWN viewport, not the outer page - and in continuous
@@ -2183,7 +2298,7 @@ HighlightableContent.displayName = 'HighlightableContent';
         // coordinate space via the iframe element itself (same-origin, so
         // `frameElement` is reachable) before comparing/scrolling it.
         const epubScrollContainer = (rendition as any)?.manager?.container as HTMLElement | undefined;
-        const iframeEl = contents?.window?.frameElement as HTMLElement | null;
+        const iframeEl = epubWindow?.frameElement as HTMLElement | null;
         if (epubScrollContainer && iframeEl) {
             const spanRect = span.getBoundingClientRect();
             const iframeRect = iframeEl.getBoundingClientRect();
@@ -2212,9 +2327,11 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (activeDoc?.type !== 'epub') return;
     const rendition = epubRenditionRef.current;
     if (!rendition) return;
-    const contents = getEpubVisibleContentsList(rendition)[0];
-    const body: HTMLElement | undefined = contents?.document?.body;
-    if (!body) return;
+    // Same reasoning as the highlight effect above - must be the exact body
+    // currentTextForTTS came from, not a fresh (possibly different, if the
+    // visible chapter has since shifted) "currently visible chapter" guess.
+    const body = epubActiveBodyRef.current;
+    if (!body || !body.isConnected) return;
 
     clearEpubAnnotationMarkers(body);
     if (sortedAnnotations.length === 0 || !currentTextForTTS) return;

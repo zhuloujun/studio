@@ -1,4 +1,3 @@
-
 // src/lib/indexedDBService.ts
 //
 // Document and media *content* now live server-side (Cloudflare R2 for file
@@ -14,6 +13,7 @@ import type { StoredMangaDocument, StoredPdfDocument, MangaDocumentDisplayInfo, 
 import { saveDocumentMetadata } from './localStorageService';
 import { getCachedUser } from './authService';
 import { isEphemeralDocId, setEphemeralDocument, getEphemeralDocument } from './ephemeralDocumentStore';
+import { getCachedDocument, setCachedDocument, clearCachedDocument, clearAllCachedDocuments } from './documentLocalCache';
 
 const DB_VERSION = 1;
 const LAST_ACTIVE_DOC_STORE_NAME = 'appState';
@@ -79,6 +79,10 @@ export function logoutAndClearPromises() {
   dbPromises.clear();
   documentCache = null;
   isFetching = null;
+  // Another account could log into this same browser next - don't leave
+  // this one's cached document contents sitting in IndexedDB for them to
+  // read.
+  clearAllCachedDocuments().catch(() => {});
 }
 
 // --- Document Functions (R2 + D1 backed via /api/documents) ---
@@ -92,7 +96,7 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
     return;
   }
 
-  documentCache = null; // Invalidate cache
+  documentCache = null; // Invalidate the document-list cache
 
   const { fileData, ...metadata } = doc as StoredMangaDocument & { fileData: ArrayBuffer };
   const form = new FormData();
@@ -104,13 +108,44 @@ export async function saveDocument(doc: StoredMangaDocument): Promise<void> {
   if (!data.success) {
     throw new Error(data.debug ? `${data.message || '保存文档失败。'}（${data.debug}）` : (data.message || '保存文档失败。'));
   }
+  // Keep the local "open instantly" cache in sync with what we just saved,
+  // so the next open of this document doesn't show stale content while the
+  // background refresh (see getDocumentById below) is still in flight.
+  setCachedDocument(doc).catch(() => {});
 }
 
-export async function getDocumentById(id: string): Promise<StoredMangaDocument | undefined> {
-  if (isEphemeralDocId(id)) {
-    return await getEphemeralDocument(id);
+// Updates only metadata fields (annotations, ocrTextPerPage, extractedText,
+// etc.) without re-uploading the file itself - see the PATCH handler in
+// /api/documents/[id] for why this exists separately from saveDocument:
+// re-uploading a whole large PDF/ebook through saveDocument for every single
+// note or text edit was slow and, on a flaky connection, could silently
+// fail - which is what made those edits look like they weren't syncing
+// across devices at all. Use this for annotation/OCR-text edits on a
+// document whose file content itself hasn't changed.
+export async function updateDocumentMetadata(
+  doc: StoredMangaDocument,
+  patch: Partial<StoredMangaDocument>
+): Promise<void> {
+  if (isEphemeralDocId(doc.id)) {
+    await setEphemeralDocument({ ...doc, ...patch });
+    return;
   }
 
+  documentCache = null; // Invalidate the document-list cache
+  const res = await fetch(`/api/documents/${encodeURIComponent(doc.id)}`, {
+    method: 'PATCH',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  const data = (await res.json().catch(() => ({}))) as any;
+  if (!data.success) {
+    throw new Error(data.debug ? `${data.message || '保存失败。'}（${data.debug}）` : (data.message || '保存失败。'));
+  }
+  setCachedDocument({ ...doc, ...patch }).catch(() => {});
+}
+
+async function fetchDocumentFromServer(id: string): Promise<StoredMangaDocument | undefined> {
   const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { credentials: 'include' });
   if (res.status === 404) return undefined;
   const data = (await res.json().catch(() => ({}))) as any;
@@ -128,6 +163,31 @@ export async function getDocumentById(id: string): Promise<StoredMangaDocument |
   const fileData = await fileRes.arrayBuffer();
 
   return { ...rest, fileData, fileUrl } as StoredMangaDocument;
+}
+
+export async function getDocumentById(id: string): Promise<StoredMangaDocument | undefined> {
+  if (isEphemeralDocId(id)) {
+    return await getEphemeralDocument(id);
+  }
+
+  // Serve straight from the local cache when we have it, so reopening a
+  // document (e.g. clicking the "阅读器" nav link, which reopens your
+  // last-active document) doesn't re-download the file and, for a PDF,
+  // re-run text extraction across every page from scratch every single
+  // time. Still quietly re-fetches from the server in the background so a
+  // later open picks up anything changed from another device - this call
+  // just doesn't block on that round-trip.
+  const cached = await getCachedDocument(id);
+  if (cached) {
+    fetchDocumentFromServer(id)
+      .then((fresh) => { if (fresh) setCachedDocument(fresh); })
+      .catch(() => {});
+    return cached;
+  }
+
+  const fresh = await fetchDocumentFromServer(id);
+  if (fresh) setCachedDocument(fresh).catch(() => {});
+  return fresh;
 }
 
 export async function getAllDocuments(forceRefresh: boolean = false): Promise<StoredMangaDocument[]> {
@@ -179,12 +239,13 @@ export async function getAllDocuments(forceRefresh: boolean = false): Promise<St
 }
 
 export async function deleteDocumentById(id: string): Promise<void> {
-  documentCache = null; // Invalidate cache
+  documentCache = null; // Invalidate the document-list cache
   const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' });
   const data = (await res.json().catch(() => ({}))) as any;
   if (!data.success) {
     throw new Error(data.message || '删除文档失败。');
   }
+  clearCachedDocument(id).catch(() => {});
 }
 
 // --- Media Functions (R2 + D1 backed via /api/media) ---

@@ -1,4 +1,3 @@
-
 "use client";
 
 import { usePlayback } from '@/components/player/PlaybackProvider';
@@ -6,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Play, Pause, SkipBack, SkipForward, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion, useDragControls } from 'framer-motion';
 import { Slider } from '@/components/ui/slider';
 
 export default function FloatingPlayer() {
@@ -31,6 +30,22 @@ export default function FloatingPlayer() {
     handleSeek,
     videoAspectRatio,
   } = usePlayback();
+
+  // The player used to have `drag` listening across the *entire* card -
+  // including the buttons, the seek slider, and the native CSS `resize`
+  // handle in its bottom-right corner. All of those have their own pointer
+  // handling, and framer-motion's drag gesture recognizer was competing
+  // with them for the same pointerdown events: sometimes the slider or the
+  // resize handle would "win" and drag never started, sometimes framer
+  // would win and swallow a click, and sometimes the two ended up with
+  // inconsistent pointer-capture state, which is what let the card keep
+  // following the mouse after it was released (or refuse to move at all)
+  // depending on exactly where the drag started. Scoping `drag` to only
+  // start from the small handle bar at the top - via `dragListener={false}`
+  // and manually calling `dragControls.start()` from that bar's own
+  // onPointerDown - is framer-motion's documented pattern for this and
+  // keeps every other control (and the resize handle) working normally.
+  const dragControls = useDragControls();
 
   const handlePlayPause = () => {
     if (isPlaying) {
@@ -73,7 +88,10 @@ export default function FloatingPlayer() {
       {isPlaying && currentItem && (
         <motion.div
           drag
+          dragListener={false}
+          dragControls={dragControls}
           dragMomentum={false}
+          dragElastic={0}
           className="fixed bottom-4 right-4 z-50 w-[512px] min-w-[300px] max-w-[80vw] min-h-[140px] resize overflow-hidden"
           style={{
             aspectRatio: isVideo && videoAspectRatio ? videoAspectRatio : undefined,
@@ -84,8 +102,11 @@ export default function FloatingPlayer() {
           transition={{ type: 'spring', stiffness: 300, damping: 30 }}
         >
           <Card className="w-full h-full shadow-2xl bg-background/80 backdrop-blur-sm flex flex-col" >
-            
-            <div className="p-1 flex items-center justify-end bg-background/50 cursor-move" onPointerDown={(e) => e.stopPropagation()}>
+
+            <div
+              className="p-1 flex items-center justify-end bg-background/50 cursor-move touch-none"
+              onPointerDown={(e) => dragControls.start(e)}
+            >
                <Button variant="ghost" size="icon" className="h-6 w-6" onClick={stop}>
                     <X className="h-4 w-4"/>
                     <span className="sr-only">Close Player</span>

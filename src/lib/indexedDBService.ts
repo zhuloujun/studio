@@ -13,7 +13,7 @@ import type { StoredMangaDocument, StoredPdfDocument, MangaDocumentDisplayInfo, 
 import { saveDocumentMetadata } from './localStorageService';
 import { getCachedUser } from './authService';
 import { isEphemeralDocId, setEphemeralDocument, getEphemeralDocument } from './ephemeralDocumentStore';
-import { getCachedDocument, setCachedDocument, clearCachedDocument, clearAllCachedDocuments } from './documentLocalCache';
+import { getCachedDocument, setCachedDocument, setCachedDocumentIfNoNewerWrite, getCacheVersion, clearCachedDocument, clearAllCachedDocuments } from './documentLocalCache';
 
 const DB_VERSION = 1;
 const LAST_ACTIVE_DOC_STORE_NAME = 'appState';
@@ -179,8 +179,12 @@ export async function getDocumentById(id: string): Promise<StoredMangaDocument |
   // just doesn't block on that round-trip.
   const cached = await getCachedDocument(id);
   if (cached) {
+    // Guard against this refresh's (older) result landing after a save the
+    // user makes while it's still in flight and wiping that edit back out
+    // of the cache.
+    const versionBeforeRefresh = getCacheVersion(id);
     fetchDocumentFromServer(id)
-      .then((fresh) => { if (fresh) setCachedDocument(fresh); })
+      .then((fresh) => { if (fresh) setCachedDocumentIfNoNewerWrite(fresh, versionBeforeRefresh); })
       .catch(() => {});
     return cached;
   }

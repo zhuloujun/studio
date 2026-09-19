@@ -812,38 +812,50 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
             startIndex: activeElement.selectionStart,
         };
     }
-  
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) return { text: '', startIndex: null };
 
-    const getSelectionDetails = (container: HTMLElement): { text: string; startIndex: number } | null => {
-        if (!selection.rangeCount || !container.contains(selection.anchorNode)) {
-            return null;
+    // EPUB's main view is rendered by epub.js into its own iframe, which has
+    // its own separate document/selection - a selection made there never
+    // shows up in the top-level window.getSelection() at all (the browser
+    // doesn't propagate it up), so it used to be that returning early here
+    // whenever the *top* window had nothing selected made every selection
+    // made directly on an EPUB page invisible to this function - repeat
+    // play, "play from selection", "add annotation" and "favorite
+    // selection" all call this and all saw an empty selection, no matter
+    // what was actually highlighted on the page. The top-level selection is
+    // checked first (below) since it covers every other format plus the
+    // "收缩TTS区域" box, but the EPUB iframe is always checked too,
+    // regardless of what the top-level selection looked like.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed) {
+        const getSelectionDetails = (container: HTMLElement): { text: string; startIndex: number } | null => {
+            if (!selection.rangeCount || !container.contains(selection.anchorNode)) {
+                return null;
+            }
+
+            const range = selection.getRangeAt(0);
+            const preSelectionRange = range.cloneRange();
+            preSelectionRange.selectNodeContents(container);
+            preSelectionRange.setEnd(range.startContainer, range.startOffset);
+
+            const startIndex = preSelectionRange.toString().length;
+            const text = range.toString();
+
+            return { text, startIndex };
+        };
+
+        const mainContainer = mainHighlightedContentRef.current;
+        if (mainContainer) {
+            const details = getSelectionDetails(mainContainer);
+            if (details) return details;
         }
 
-        const range = selection.getRangeAt(0);
-        const preSelectionRange = range.cloneRange();
-        preSelectionRange.selectNodeContents(container);
-        preSelectionRange.setEnd(range.startContainer, range.startOffset);
-        
-        const startIndex = preSelectionRange.toString().length;
-        const text = range.toString();
-
-        return { text, startIndex };
-    };
-
-    const mainContainer = mainHighlightedContentRef.current;
-    if(mainContainer) {
-      const details = getSelectionDetails(mainContainer);
-      if (details) return details;
+        const ttsContainer = ttsBoxHighlightedContentRef.current;
+        if (ttsContainer && ttsContainer.contains(selection.anchorNode)) {
+            const details = getSelectionDetails(ttsContainer);
+            if (details) return details;
+        }
     }
 
-    const ttsContainer = ttsBoxHighlightedContentRef.current;
-     if(ttsContainer && ttsContainer.contains(selection.anchorNode)) {
-      const details = getSelectionDetails(ttsContainer);
-      if (details) return details;
-    }
-    
     if (activeDoc?.type === 'epub' && epubRenditionRef.current) {
         try {
             const epubWindow = epubRenditionRef.current.getContents()?.[0]?.window;
@@ -875,7 +887,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
         } catch (e) { console.warn("Could not get selection from EPUB iframe", e); }
     }
   
-    return { text: selection.toString(), startIndex: null };
+    return { text: selection?.toString() || '', startIndex: null };
 }, [activeDoc?.type]);
 
 
@@ -1780,18 +1792,30 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
         // into its own inner element and render `children` as a sibling
         // instead, same layered structure the plain-text branch below
         // already uses (outer positioned container + content + markers).
-        // The ref'd element must stay the actual scrollable container (it's
-        // read via containerRef.current.scrollTop by getCharPosition below,
-        // for AnnotationMarkers' pixel positioning) and must stay
-        // position:relative (for the markers' absolute positioning) - so
-        // overflow-y-auto/relative live on the outer div, the HTML content
-        // goes in a plain inner div, and `children` (AnnotationMarkers)
-        // render as a sibling of that inner div.
+        // Deliberately NOT overflow-y-auto here (even though it was before) -
+        // that made this div its own separate scroll container nested
+        // inside the reading pane's actual scrollable area
+        // (scrollContainerRef/CardContent), instead of just relying on that
+        // outer one the way the plain-text branch below already does. Two
+        // consequences of that nesting, both matching what was reported:
+        // every dangerouslySetInnerHTML update (i.e. every segment change
+        // during playback) fully replaces this div's DOM, which resets *its
+        // own* scrollTop back to 0 - so each new highlighted sentence forced
+        // a large re-scroll back down to it, instead of the small nudge
+        // TXT/PDF-text-view show. And for "repeat" playback specifically,
+        // the highlight span computed from an unrelated stale
+        // highlightedSegmentIndex (see the manualHighlightRange prop now
+        // passed below) would get auto-scrolled to inside *this* container,
+        // which combined with the scroll-reset above could land back near
+        // the very top of the chapter. Position:relative still lives here
+        // (for the markers' absolute positioning); scrollTop is always 0 now
+        // since the outer scrollContainerRef div does the actual scrolling,
+        // same as getCharPosition below already assumes for TXT/PDF-text.
         return (
             <div
                 ref={ref}
                 className={cn(
-                    "max-w-none w-full h-full overflow-y-auto select-text relative leading-relaxed " +
+                    "max-w-none w-full h-full select-text relative leading-relaxed " +
                     "[&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 " +
                     "[&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_p]:mb-3 [&_p]:indent-8 [&_strong]:font-bold [&_em]:italic " +
                     "[&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:indent-0 [&_img]:max-w-full [&_img]:h-auto",
@@ -2898,6 +2922,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                 highlightedSegmentIndex={highlightedSegmentIndex}
                 isSpeaking={isSpeaking}
                 isPaused={isPaused}
+                manualHighlightRange={manualHighlightRange}
                 isHtml={true}
                 className="p-4 md:p-6"
               >
@@ -2915,6 +2940,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                 highlightedSegmentIndex={highlightedSegmentIndex}
                 isSpeaking={isSpeaking}
                 isPaused={isPaused}
+                manualHighlightRange={manualHighlightRange}
                 isHtml={true}
                 className="p-4 md:p-6 max-w-none leading-relaxed [&_h1]:text-2xl [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-3 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-4 [&_h2]:mb-2 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-3 [&_h3]:mb-2 [&_h4]:text-base [&_h4]:font-bold [&_h4]:mt-3 [&_h4]:mb-1 [&_h5]:text-base [&_h5]:font-semibold [&_h6]:text-sm [&_h6]:font-semibold [&_p]:mb-3 [&_p]:indent-8 [&_strong]:font-bold [&_em]:italic [&_u]:underline [&_a]:text-primary [&_a]:underline [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:mb-3 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:mb-3 [&_li]:mb-1 [&_li]:indent-0 [&_blockquote]:border-l-4 [&_blockquote]:border-muted-foreground/30 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:my-3 [&_table]:border-collapse [&_table]:mb-3 [&_td]:border [&_td]:p-2 [&_th]:border [&_th]:p-2 [&_th]:bg-muted [&_th]:font-semibold [&_img]:max-w-full [&_img]:h-auto [&_img]:my-3 [&_hr]:my-4"
               >
@@ -2975,7 +3001,7 @@ HighlightableContent.displayName = 'HighlightableContent';
 
     return null;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, docxHtmlContent, viewScale, isContinuousScroll, continuousPageImages, isRenderingContinuous]);
+  }, [activeDoc, isPdfTextView, pdfPageImage, currentPdfPageNum, displayedImageSrc, docId, currentTextForTTS, textSegments, highlightedSegmentIndex, isSpeaking, isPaused, manualHighlightRange, readerDict.scratchpadPlaceholder, sortedAnnotations, scratchpadText, mobiHtmlContent, docxHtmlContent, viewScale, isContinuousScroll, continuousPageImages, isRenderingContinuous]);
 
   if (showInitialLoader) { 
     return <div className="flex items-center justify-center h-full flex-grow"><Loader2 className="h-12 w-12 animate-spin text-primary" /><p className="ml-4 text-lg">{readerDict.loadingDocument}</p></div>; 

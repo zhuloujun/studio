@@ -121,8 +121,57 @@ function extractReadableTextFromPdfPage(
     return result;
   };
 
-  const columnSplitX = pageWidth / 2;
   const wideThreshold = pageWidth * 0.6;
+  const lineSpan = (line: TextItem[]): [number, number] => {
+    const minX = line[0].x;
+    const last = line[line.length - 1];
+    return [minX, last.x + last.width];
+  };
+  const isWideLine = (line: TextItem[]) => {
+    const [minX, maxX] = lineSpan(line);
+    return maxX - minX >= wideThreshold;
+  };
+
+  // Find the column boundary by looking for the widest vertical "gutter" -
+  // an x-range no narrow line's text crosses - rather than assuming an even
+  // 50/50 split, which breaks for the (common) case of unequal column
+  // widths, a sidebar, or a single-column document that just happens to
+  // have some short lines. If no clear gutter is found, this falls back to
+  // plain top-to-bottom order instead of guessing at a column split.
+  const narrowLines = lines.filter((l) => !isWideLine(l));
+  let splitX: number | null = null;
+  if (narrowLines.length >= 4) {
+    const intervals = narrowLines.map(lineSpan).sort((a, b) => a[0] - b[0]);
+    const merged: [number, number][] = [];
+    for (const [s, e] of intervals) {
+      const lastInterval = merged[merged.length - 1];
+      if (lastInterval && s <= lastInterval[1] + pageWidth * 0.02) {
+        lastInterval[1] = Math.max(lastInterval[1], e);
+      } else {
+        merged.push([s, e]);
+      }
+    }
+    let bestGap = 0;
+    let bestGapMid: number | null = null;
+    for (let i = 1; i < merged.length; i++) {
+      const gap = merged[i][0] - merged[i - 1][1];
+      if (gap > bestGap) {
+        bestGap = gap;
+        bestGapMid = (merged[i][0] + merged[i - 1][1]) / 2;
+      }
+    }
+    // Require a real gutter (not just normal word/line-wrap ragged-edge
+    // variation) before trusting it as a genuine column boundary.
+    if (bestGap > pageWidth * 0.04) splitX = bestGapMid;
+  }
+
+  if (splitX === null) {
+    // No confidently-detected column split - emit everything in plain
+    // top-to-bottom order rather than risk misreading a single-column
+    // document as two columns.
+    return lines.map(joinLine).join('\n').replace(/[ \t]+/g, ' ').trim();
+  }
+
   const outputLines: string[] = [];
   let pendingLeft: TextItem[][] = [];
   let pendingRight: TextItem[][] = [];
@@ -135,17 +184,13 @@ function extractReadableTextFromPdfPage(
   };
 
   for (const line of lines) {
-    const minX = line[0].x;
-    const last = line[line.length - 1];
-    const maxX = last.x + last.width;
-    const lineWidth = maxX - minX;
-
-    if (lineWidth >= wideThreshold) {
+    if (isWideLine(line)) {
       flushColumns();
       outputLines.push(joinLine(line));
     } else {
+      const [minX, maxX] = lineSpan(line);
       const centerX = (minX + maxX) / 2;
-      if (centerX < columnSplitX) pendingLeft.push(line);
+      if (centerX < splitX) pendingLeft.push(line);
       else pendingRight.push(line);
     }
   }
@@ -299,6 +344,15 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const isSpeakingRef = useRef(false);
   const isPausedRef = useRef(false);
   const segmentIndexRef = useRef(0);
+  // Mirrors speechOrigin state for use inside the <audio> element's native
+  // event listeners (see the audio-setup effect below), the same way
+  // isSpeakingRef mirrors isSpeaking - reading a ref there instead of the
+  // state value means that effect doesn't need speechOrigin/isSpeaking in
+  // its dependency array, so it no longer tears down and rebuilds the
+  // <audio> element (and re-binds all its listeners) on every play/stop,
+  // which was the source of repeat-playback highlighting silently stopping
+  // working after the first use.
+  const speechOriginRef = useRef<SpeechOrigin>(null);
   
   const [selectionForAnnotation, setSelectionForAnnotation] = useState<SelectionForAnnotation>(null);
 
@@ -410,21 +464,46 @@ const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: 
     const [positions, setPositions] = useState<Record<string, { top: number, left: number } | null>>({});
 
     useEffect(() => {
-        if (containerRef.current && annotations.length > 0 && text) {
-            const newPositions: Record<string, { top: number, left: number } | null> = {};
-            annotations.forEach(ann => {
-                // Use the end of the target text for positioning the marker,
-                // resolved against the current text rather than trusting a
-                // possibly-stale stored index.
-                const resolvedStart = resolveAnnotationPosition(text, ann);
-                if (resolvedStart === null) { newPositions[ann.id] = null; return; }
-                const finalCharIndex = resolvedStart + ann.targetText.length - 1;
-                newPositions[ann.id] = getCharPosition(containerRef.current!, finalCharIndex);
-            });
-            setPositions(newPositions);
-        } else if (annotations.length === 0) {
-            setPositions({}); // Clear positions if no annotations
+        const recomputePositions = () => {
+            if (!isMountedRef2.current) return;
+            if (containerRef.current && annotations.length > 0 && text) {
+                const newPositions: Record<string, { top: number, left: number } | null> = {};
+                annotations.forEach(ann => {
+                    // Use the end of the target text for positioning the marker,
+                    // resolved against the current text rather than trusting a
+                    // possibly-stale stored index.
+                    const resolvedStart = resolveAnnotationPosition(text, ann);
+                    if (resolvedStart === null) { newPositions[ann.id] = null; return; }
+                    const finalCharIndex = resolvedStart + ann.targetText.length - 1;
+                    newPositions[ann.id] = getCharPosition(containerRef.current!, finalCharIndex);
+                });
+                setPositions(newPositions);
+            } else if (annotations.length === 0) {
+                setPositions({}); // Clear positions if no annotations
+            }
+        };
+        const isMountedRef2 = { current: true };
+
+        recomputePositions();
+
+        // A marker's pixel position depends on the container's current
+        // layout, not just the character index - collapsing/expanding the
+        // "收缩TTS区域" box (or switching it between caption/fullscreen),
+        // zooming, or resizing the window all change that layout without
+        // necessarily changing `annotations` or `text`, which used to leave
+        // stale (and visually wrong) marker positions until some other
+        // state change happened to force a recompute. Watching the
+        // container's size directly fixes that in general.
+        let observer: ResizeObserver | null = null;
+        if (containerRef.current && typeof ResizeObserver !== 'undefined') {
+            observer = new ResizeObserver(() => recomputePositions());
+            observer.observe(containerRef.current);
         }
+
+        return () => {
+            isMountedRef2.current = false;
+            observer?.disconnect();
+        };
     }, [annotations, containerRef, text]); // Rerun when text changes to re-evaluate positions
 
     if (annotations.length === 0) return null;
@@ -574,6 +653,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
   const stopSpeech = useCallback((resetUIState = true) => {
     isSpeakingRef.current = false;
     isPausedRef.current = false;
+    speechOriginRef.current = null;
     if (isMountedRef.current) {
         setHighlightedSegmentIndex(-1);
     }
@@ -1143,14 +1223,19 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
           const docFromDB = await IndexedDBService.getDocumentById(currentActiveDoc.id);
           if (docFromDB) {
             let updatedDocForSave: StoredMangaDocument = { ...docFromDB };
+            let patch: Partial<StoredMangaDocument> = {};
             if (updatedDocForSave.type === 'image') {
               (updatedDocForSave as StoredImageDocument).extractedText = ocrText;
+              patch = { extractedText: ocrText } as Partial<StoredImageDocument>;
             } else if (updatedDocForSave.type === 'pdf' && currentPdfPageNum) {
               const ocrPages = { ...((updatedDocForSave as StoredPdfDocument).ocrTextPerPage || {}), [currentPdfPageNum]: ocrText };
               (updatedDocForSave as StoredPdfDocument).ocrTextPerPage = ocrPages;
+              patch = { ocrTextPerPage: ocrPages } as Partial<StoredPdfDocument>;
               if (isMountedRef.current) setPdfPageIsTextBased(false);
             }
-            await IndexedDBService.saveDocument(updatedDocForSave);
+            // Metadata-only edit (OCR text, not the file itself) - no need
+            // to re-upload the whole PDF/image through saveDocument.
+            await IndexedDBService.updateDocumentMetadata(updatedDocForSave, patch);
             if (isMountedRef.current && activeDoc?.id === updatedDocForSave.id) {
               setActiveDoc(updatedDocForSave as ActiveMangaDocument);
             }
@@ -1259,16 +1344,28 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
 
 
   useEffect(() => {
-    let player = new Audio(); 
+    // isSpeaking/speechOrigin deliberately are NOT dependencies here - they
+    // used to be, which meant this effect tore down and rebuilt the whole
+    // <audio> element (destroying and re-binding all its listeners) on
+    // every single play/stop during normal use. That churn is what made
+    // repeat-playback highlighting work the first time and then silently
+    // stop: by the time a second repeat-play's 'ended' event fired, it
+    // could be a leftover listener from an earlier, already-replaced
+    // element/closure. The handlers below read the *Ref mirrors instead of
+    // the state values, so the element - and its listeners - are created
+    // exactly once per mount (or per TTS engine switch) and stay stable
+    // across any number of plays.
+    let player = new Audio();
     audioPlayerRef.current = player;
     const handleAudioEnded = () => {
-        if (audioPlayerRef.current === player && isSpeaking && isMountedRef.current) {
+        if (audioPlayerRef.current === player && isSpeakingRef.current && isMountedRef.current) {
           if (ttsSettings.engine === 'local') {
-          } else if (ttsSettings.engine === 'cloud' && isSpeakingRef.current) {
-            if (speechOrigin === 'repeat') {
+          } else if (ttsSettings.engine === 'cloud') {
+            if (speechOriginRef.current === 'repeat') {
               // A one-off "repeat playback" clip finished - just clear the
               // highlight/speaking state, don't continue into main playback.
               isSpeakingRef.current = false;
+              speechOriginRef.current = null;
               setIsSpeaking(false);
               setSpeechOrigin(null);
               setManualHighlightRange(null);
@@ -1279,17 +1376,16 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
           }
         }
     };
-    const handleAudioPlaying = () => { if (audioPlayerRef.current === player && ttsSettings.engine === 'cloud' && isSpeaking && isMountedRef.current) { setIsLoadingTTS(false); } };
-    const handleAudioError = () => { if (audioPlayerRef.current === player && isSpeaking && isMountedRef.current) { toast({variant: "destructive", title: readerDict.audioError, description: readerDict.failedToPlay}); stopSpeech(true); } };
+    const handleAudioPlaying = () => { if (audioPlayerRef.current === player && ttsSettings.engine === 'cloud' && isSpeakingRef.current && isMountedRef.current) { setIsLoadingTTS(false); } };
+    const handleAudioError = () => { if (audioPlayerRef.current === player && isSpeakingRef.current && isMountedRef.current) { toast({variant: "destructive", title: readerDict.audioError, description: readerDict.failedToPlay}); stopSpeech(true); } };
     player.addEventListener('ended', handleAudioEnded); player.addEventListener('playing', handleAudioPlaying); player.addEventListener('error', handleAudioError);
     return () => {
         player.removeEventListener('ended', handleAudioEnded); player.removeEventListener('playing', handleAudioPlaying); player.removeEventListener('error', handleAudioError);
+        if (audioPlayerRef.current === player) audioPlayerRef.current = null;
         if (player.src && !player.paused) player.pause();
         player.src = "";
-        player = null;
-        if (audioPlayerRef.current === player) audioPlayerRef.current = null;
     };
-  }, [ttsSettings.engine, isSpeaking, speechOrigin, stopSpeech, toast, readerDict.audioError, readerDict.failedToPlay]);
+  }, [ttsSettings.engine, stopSpeech, toast, readerDict.audioError, readerDict.failedToPlay]);
   
   const HighlightableContent = React.forwardRef<HTMLDivElement, {
     text: string;
@@ -1427,7 +1523,8 @@ HighlightableContent.displayName = 'HighlightableContent';
         setIsPaused(false);
         isPausedRef.current = false;
         setSpeechOrigin(origin);
-        
+        speechOriginRef.current = origin;
+
         // This is the restored logic to handle starting from a selection.
         if (startIndex > 0) {
             let charCount = 0;
@@ -1530,6 +1627,7 @@ HighlightableContent.displayName = 'HighlightableContent';
     // an explicit character range (rather than a segment index) since a
     // manual selection rarely lines up with sentence-level textSegments.
     setSpeechOrigin('repeat');
+    speechOriginRef.current = 'repeat';
     setIsSpeaking(true);
     isSpeakingRef.current = true;
     setIsPaused(false);
@@ -1542,6 +1640,7 @@ HighlightableContent.displayName = 'HighlightableContent';
         setIsSpeaking(false);
         isSpeakingRef.current = false;
         setSpeechOrigin(null);
+        speechOriginRef.current = null;
         setManualHighlightRange(null);
     };
 
@@ -1930,7 +2029,9 @@ HighlightableContent.displayName = 'HighlightableContent';
           updatedAnnotations = [...(activeDoc.annotations || []), newOrUpdatedAnnotation];
         }
         const updatedDoc = { ...activeDoc, annotations: updatedAnnotations };
-        await IndexedDBService.saveDocument(updatedDoc);
+        // A note is a metadata-only change - saving it shouldn't require
+        // re-uploading the whole document file.
+        await IndexedDBService.updateDocumentMetadata(updatedDoc, { annotations: updatedAnnotations });
         setActiveDoc(updatedDoc);
       } else {
         let updatedAnnotations;
@@ -1959,7 +2060,7 @@ HighlightableContent.displayName = 'HighlightableContent';
         if (activeDoc) {
             const updatedAnnotations = activeDoc.annotations?.filter(a => a.id !== annotationId);
             const updatedDoc = { ...activeDoc, annotations: updatedAnnotations };
-            await IndexedDBService.saveDocument(updatedDoc);
+            await IndexedDBService.updateDocumentMetadata(updatedDoc, { annotations: updatedAnnotations });
             setActiveDoc(updatedDoc);
         } else {
             const updatedAnnotations = scratchpadAnnotations.filter(a => a.id !== annotationId);
@@ -2016,8 +2117,19 @@ HighlightableContent.displayName = 'HighlightableContent';
             let updatedDoc = { ...activeDoc };
             let docNeedsSave = false;
 
+            // Only txt/pdf-text-view/mobi edits change the file bytes
+            // themselves - image and PDF-image-mode edits only change the
+            // OCR text metadata, so those are saved through the lightweight
+            // metadata-only path (no re-upload of the file, faster and far
+            // less likely to silently fail on a slow connection, which is
+            // what made these edits look like they weren't syncing across
+            // devices at all).
+            let metadataOnlyPatch: Partial<StoredMangaDocument> | null = null;
+            let fileChanged = false;
+
             if (updatedDoc.type === 'image') {
                 updatedDoc.extractedText = currentTextForTTS;
+                metadataOnlyPatch = { extractedText: currentTextForTTS };
                 docNeedsSave = true;
             } else if (updatedDoc.type === 'pdf' && !isPdfTextView) {
                 const pageNum = currentPdfPageNum;
@@ -2025,6 +2137,7 @@ HighlightableContent.displayName = 'HighlightableContent';
                     updatedDoc.ocrTextPerPage = {};
                 }
                 updatedDoc.ocrTextPerPage[pageNum] = currentTextForTTS;
+                metadataOnlyPatch = { ocrTextPerPage: updatedDoc.ocrTextPerPage };
                 docNeedsSave = true;
             } else if (updatedDoc.type === 'txt' || (updatedDoc.type === 'pdf' && isPdfTextView) || updatedDoc.type === 'mobi') {
                 const tempDiv = document.createElement('div');
@@ -2033,15 +2146,19 @@ HighlightableContent.displayName = 'HighlightableContent';
 
                 const encoder = new TextEncoder();
                 updatedDoc.fileData = encoder.encode(textContentForSave);
-                
+                fileChanged = true;
                 docNeedsSave = true;
             }
-            
+
             if (docNeedsSave) {
                 try {
-                    await IndexedDBService.saveDocument(updatedDoc);
+                    if (fileChanged || !metadataOnlyPatch) {
+                        await IndexedDBService.saveDocument(updatedDoc);
+                    } else {
+                        await IndexedDBService.updateDocumentMetadata(updatedDoc, metadataOnlyPatch);
+                    }
                     setActiveDoc(updatedDoc);
-                    toast({ title: "Changes Saved", description: "Your edits have been saved to the local database." });
+                    toast({ title: "Changes Saved", description: "Your edits have been saved and synced." });
                 } catch (e: any) {
                     toast({ variant: "destructive", title: "Save Error", description: `Could not save changes: ${e.message}` });
                 }

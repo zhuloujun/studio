@@ -231,6 +231,13 @@ type SelectionForAnnotation = {
 function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobile: boolean | undefined }) {
   const { toast } = useToast();
   const router = useRouter();
+  // A "jump back to this exact spot" link from the favorites/notes-favorites
+  // list (see documentation on jumpSearchParams' three params below) arrives
+  // as query params on this same /reader route, read once per document load
+  // inside the loadDocument effect further down rather than as a reactive
+  // dependency, since they should only apply to the initial jump - not
+  // re-fire the whole document-loading effect on every render.
+  const jumpSearchParams = useSearchParams();
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
   const commonDict = dictionary.common;
@@ -270,6 +277,19 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const epubImageForOcrRef = useRef<string | null>(null);
   const [epubTotalPages, setEpubTotalPages] = useState(0);
   const [epubCurrentPageNum, setEpubCurrentPageNum] = useState(1);
+  // Latest exact epub.js CFI for the current reading position, kept as a
+  // ref (rather than state) purely for reading synchronously from
+  // handlers (favoriting/annotating) without adding a re-render on every
+  // page turn - epubCurrentPageNum already covers the "trigger a re-render"
+  // need.
+  const epubCurrentCfiRef = useRef<string | null>(null);
+  // For a "jump back to this favorite" link that only has a page number
+  // (no CFI - true for favorites/notes saved before that field existed),
+  // the target page can't be resolved until epub.js has finished its own
+  // pagination pass (isEpubReadyForJumping). Holds the pending page number
+  // in the meantime; the effect below fires the jump once pagination is
+  // ready and clears it.
+  const pendingEpubPageJumpRef = useRef<number | null>(null);
   const [isEpubPaginating, setIsEpubPaginating] = useState(true);
   const [isEpubReadyForJumping, setIsEpubReadyForJumping] = useState(false);
   const [epubToc, setEpubToc] = useState<any[]>([]); // For EPUB table of contents
@@ -571,6 +591,101 @@ function resolveAnnotationPosition(text: string, ann: Annotation): number | null
         return best;
     }
     return occurrences[0];
+}
+
+// Wraps the plain-text character range [start, end) of `root`'s rendered
+// text in a highlight <span>, by walking the DOM's text nodes to find where
+// those offsets actually land (the offsets are into the plain text, e.g.
+// the same offsets textSegments/currentTextForTTS use - not into any HTML
+// markup). Shared by wrapHtmlRangeWithHighlight (works on a detached
+// container built from an HTML string, for MOBI/DOCX) and the EPUB
+// highlight effect below (works directly on the live iframe document, since
+// epub.js renders each chapter into its own iframe rather than markup we
+// control).
+function applyLiveRangeHighlight(root: HTMLElement, start: number, end: number): HTMLElement | null {
+    if (start < 0 || end <= start) return null;
+    const doc = root.ownerDocument;
+    try {
+        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let cur = 0;
+        let startNode: Text | null = null, startOffset = 0;
+        let endNode: Text | null = null, endOffset = 0;
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+            const textNode = node as Text;
+            const len = textNode.data.length;
+            const nodeStart = cur;
+            const nodeEnd = cur + len;
+
+            if (!startNode && start >= nodeStart && start <= nodeEnd) {
+                startNode = textNode;
+                startOffset = start - nodeStart;
+            }
+            if (!endNode && end >= nodeStart && end <= nodeEnd) {
+                endNode = textNode;
+                endOffset = end - nodeStart;
+            }
+            cur = nodeEnd;
+            if (startNode && endNode) break;
+        }
+
+        // If the end offset runs past the end of the content (e.g. the
+        // last segment on the page), clamp to the very end of the content.
+        if (startNode && !endNode) {
+            let lastText: Text | null = null;
+            const w2 = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+            let n2: Node | null;
+            while ((n2 = w2.nextNode())) lastText = n2 as Text;
+            if (lastText) { endNode = lastText; endOffset = lastText.data.length; }
+        }
+
+        if (!startNode || !endNode) return null;
+
+        const range = doc.createRange();
+        range.setStart(startNode, startOffset);
+        range.setEnd(endNode, endOffset);
+
+        const span = doc.createElement('span');
+        span.className = 'text-green-600 bg-green-600/10';
+        span.setAttribute('data-highlight-target', 'true');
+        // surroundContents throws if the range's boundary points partially
+        // select a non-Text node (e.g. it straddles into/out of a <strong>)
+        // - in that case just skip highlighting rather than corrupting the
+        // markup.
+        range.surroundContents(span);
+        return span;
+    } catch {
+        return null;
+    }
+}
+
+// Removes any highlight span(s) previously inserted by applyLiveRangeHighlight
+// into a *live* document (used for the EPUB iframe, which - unlike the
+// MOBI/DOCX detached-container case - persists across highlight updates and
+// so needs its old highlight explicitly unwrapped before a new one is added).
+function clearLiveRangeHighlight(root: HTMLElement) {
+    try {
+        const existing = root.querySelectorAll('[data-highlight-target="true"]');
+        existing.forEach((span) => {
+            const parent = span.parentNode;
+            if (!parent) return;
+            while (span.firstChild) parent.insertBefore(span.firstChild, span);
+            parent.removeChild(span);
+            parent.normalize();
+        });
+    } catch { /* best-effort cleanup only */ }
+}
+
+function wrapHtmlRangeWithHighlight(html: string, start: number, end: number): string {
+    if (typeof document === 'undefined') return html;
+    try {
+        const container = document.createElement('div');
+        container.innerHTML = html;
+        applyLiveRangeHighlight(container, start, end);
+        return container.innerHTML;
+    } catch {
+        return html;
+    }
 }
 
 const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: React.RefObject<HTMLElement>, annotations: Annotation[], text: string }) => {
@@ -964,9 +1079,14 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
               // memory of the page, so opening the same document elsewhere
               // resumes at the same spot instead of showing a different,
               // possibly-never-visited page on this device by default.
+              // An explicit "jump to this page" request (from a favorite's
+              // "back to reader" button) takes priority over both of those -
+              // it's a request for one specific spot, not "wherever this
+              // document was last left".
+              const jumpPageParam = parseInt(jumpSearchParams.get('page') || '', 10);
               const syncedPageNum = (doc as StoredPdfDocument).lastPdfPageNum;
               const savedPageIndex = LocalStorageService.loadCurrentPdfPageIndexForDoc(doc.id);
-              const initialPageNum = syncedPageNum || savedPageIndex || 1;
+              const initialPageNum = (Number.isFinite(jumpPageParam) && jumpPageParam > 0 ? jumpPageParam : 0) || syncedPageNum || savedPageIndex || 1;
               setCurrentPdfPageNum((initialPageNum > 0 && initialPageNum <= pdf.numPages) ? initialPageNum : 1);
             } catch (pdfError: any) {
               if (isStale) return;
@@ -1066,6 +1186,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                       if (currentDocId) {
                           LocalStorageService.saveCurrentEpubCfiForDoc(currentDocId, location.start.cfi);
                       }
+                      epubCurrentCfiRef.current = location.start.cfi || null;
 
                       if (epubBookRef.current.locations.length() > 0) {
                           const percentage = epubBookRef.current.locations.percentageFromCfi(location.start.cfi);
@@ -1079,8 +1200,24 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                   
                   generateEpubPagination(book);
 
-                  const lastLocation = LocalStorageService.loadCurrentEpubCfiForDoc(doc.id); 
-                  await rendition.display(lastLocation || undefined);
+                  // An explicit "jump to this location" request (from a
+                  // favorite/note's "back to reader" button) takes priority
+                  // over the last-read position remembered for this
+                  // document/browser.
+                  const jumpCfiParam = jumpSearchParams.get('cfi');
+                  const lastLocation = LocalStorageService.loadCurrentEpubCfiForDoc(doc.id);
+                  await rendition.display(jumpCfiParam || lastLocation || undefined);
+
+                  // No CFI to jump to directly, but there is a page-number
+                  // target (an older favorite/note saved before CFIs were
+                  // recorded) - resolve it to a location once pagination
+                  // finishes, via the effect watching isEpubReadyForJumping.
+                  if (!jumpCfiParam) {
+                      const jumpPageParam = parseInt(jumpSearchParams.get('page') || '', 10);
+                      if (Number.isFinite(jumpPageParam) && jumpPageParam > 0) {
+                          pendingEpubPageJumpRef.current = jumpPageParam;
+                      }
+                  }
 
               } catch (e: any) {
                   if (isStale) return;
@@ -1120,11 +1257,18 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 setMobiToc(flattenMobiToc(mobiBook.getToc()));
 
                 if (spine.length > 0) {
-                    const firstChapter = mobiBook.loadChapter(spine[0].id);
+                    // An explicit "jump to this chapter" request (from a
+                    // favorite's "back to reader" button) takes priority
+                    // over always starting at the first chapter.
+                    const jumpChapterParam = parseInt(jumpSearchParams.get('chapter') || '', 10);
+                    const initialChapterIndex = (Number.isFinite(jumpChapterParam) && jumpChapterParam >= 0 && jumpChapterParam < spine.length)
+                        ? jumpChapterParam
+                        : 0;
+                    const firstChapter = mobiBook.loadChapter(spine[initialChapterIndex].id);
                     if (firstChapter) {
-                        setMobiCurrentIndex(0);
+                        setMobiCurrentIndex(initialChapterIndex);
                         setMobiHtmlContent(firstChapter.html);
-                        const savedChapterText = (doc as StoredMobiDocument).mobiTextPerChapter?.[0];
+                        const savedChapterText = (doc as StoredMobiDocument).mobiTextPerChapter?.[initialChapterIndex];
                         const plainText = savedChapterText ?? (new DOMParser().parseFromString(firstChapter.html, 'text/html').body.textContent || "");
                         setCurrentTextForTTS(plainText);
                     }
@@ -1603,6 +1747,46 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
         // MOBI is now paginated by chapter (via the mobi-parser library's
         // spine/TOC), not by pixel-width CSS columns - so it renders as a
         // normal scrollable block here, same as DOCX.
+        //
+        // Unlike the plain-text branch below, this used to render `text`
+        // (the raw chapter/document HTML) completely unmodified - it never
+        // looked at highlightedSegmentIndex/manualHighlightRange at all, so
+        // MOBI and DOCX never showed the green playback highlight in the
+        // main reading view (only in the "收缩TTS区域" box, which renders
+        // the same content as plain text instead of HTML). Figure out the
+        // [start,end) character range to highlight - against the same
+        // plain-text offsets textSegments/currentTextForTTS use - and wrap
+        // just that range's text node(s) in the parsed HTML with a
+        // highlight span before rendering.
+        const highlightedHtml = useMemo(() => {
+            if (!(isSpeaking || isPaused)) return text;
+            let range: { start: number; end: number } | null = null;
+            if (manualHighlightRange) {
+                range = manualHighlightRange;
+            } else if (highlightedSegmentIndex >= 0 && textSegments[highlightedSegmentIndex]) {
+                let cur = 0;
+                for (let i = 0; i < highlightedSegmentIndex; i++) cur += textSegments[i].length;
+                range = { start: cur, end: cur + textSegments[highlightedSegmentIndex].length };
+            }
+            if (!range) return text;
+            return wrapHtmlRangeWithHighlight(text, range.start, range.end);
+        }, [text, isSpeaking, isPaused, manualHighlightRange, textSegments, highlightedSegmentIndex]);
+
+        // dangerouslySetInnerHTML can't be combined with `children` on the
+        // same element (React only allows one or the other) - that used to
+        // mean the AnnotationMarkers passed in as `children` were silently
+        // dropped entirely for MOBI/DOCX, so a note added via selection
+        // never showed its marker in the main view. Split the HTML content
+        // into its own inner element and render `children` as a sibling
+        // instead, same layered structure the plain-text branch below
+        // already uses (outer positioned container + content + markers).
+        // The ref'd element must stay the actual scrollable container (it's
+        // read via containerRef.current.scrollTop by getCharPosition below,
+        // for AnnotationMarkers' pixel positioning) and must stay
+        // position:relative (for the markers' absolute positioning) - so
+        // overflow-y-auto/relative live on the outer div, the HTML content
+        // goes in a plain inner div, and `children` (AnnotationMarkers)
+        // render as a sibling of that inner div.
         return (
             <div
                 ref={ref}
@@ -1613,8 +1797,10 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                     "[&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:indent-0 [&_img]:max-w-full [&_img]:h-auto",
                     className
                 )}
-                dangerouslySetInnerHTML={{ __html: text }}
-            />
+            >
+                <div dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+                {children}
+            </div>
         );
     }
 
@@ -1628,7 +1814,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
             content = (
                 <>
                     {text.slice(0, start)}
-                    <span className="text-green-600 bg-green-600/10">{text.slice(start, safeEnd)}</span>
+                    <span className="text-green-600 bg-green-600/10" data-highlight-target="true">{text.slice(start, safeEnd)}</span>
                     {text.slice(safeEnd)}
                 </>
             );
@@ -1644,7 +1830,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 currentIndex = segmentEnd;
 
                 if (index === highlightedSegmentIndex) {
-                    return <span key={index} className="text-green-600 bg-green-600/10">{segment}</span>;
+                    return <span key={index} className="text-green-600 bg-green-600/10" data-highlight-target="true">{segment}</span>;
                 }
                 return segment;
             });
@@ -1670,7 +1856,14 @@ HighlightableContent.displayName = 'HighlightableContent';
       const contentContainer = mainHighlightedContentRef.current;
 
       if (scrollContainer && contentContainer) {
-          const element = contentContainer.querySelector('span');
+          // Must target the highlighted span specifically, not just any
+          // <span> in the container - for MOBI/DOCX (rendered as raw HTML)
+          // the document's own formatting can contain earlier <span>
+          // elements unrelated to playback, and scrolling to the *first*
+          // one in the DOM (often near the top of the page/chapter) was
+          // what made the page appear to "jump back to the start" every
+          // time playback advanced.
+          const element = contentContainer.querySelector('[data-highlight-target="true"]');
           if (element) {
               const elementRect = element.getBoundingClientRect();
               const containerRect = scrollContainer.getBoundingClientRect();
@@ -1687,7 +1880,7 @@ HighlightableContent.displayName = 'HighlightableContent';
       const ttsBoxContainer = ttsBoxHighlightedContentRef.current;
 
       if (ttsBoxContainer) {
-          const element = ttsBoxContainer.querySelector('span');
+          const element = ttsBoxContainer.querySelector('[data-highlight-target="true"]');
           if (element) {
               const elementRect = element.getBoundingClientRect();
               const containerRect = ttsBoxContainer.getBoundingClientRect();
@@ -1699,6 +1892,59 @@ HighlightableContent.displayName = 'HighlightableContent';
     }
   }, [highlightedSegmentIndex, isSpeaking, isPaused]);
 
+  // EPUB's main view is rendered by epub.js into its own iframe, not through
+  // HighlightableContent, so it never got the green playback highlight or
+  // auto-scroll that the other formats have. Mirror the same [start, end)
+  // range computation the isHtml (MOBI/DOCX) branch uses, but apply/clear it
+  // directly against the current chapter's live iframe document.
+  useEffect(() => {
+    if (activeDoc?.type !== 'epub') return;
+    const rendition = epubRenditionRef.current;
+    if (!rendition) return;
+    const contents = rendition.getContents?.()?.[0];
+    const body: HTMLElement | undefined = contents?.document?.body;
+    if (!body) return;
+
+    clearLiveRangeHighlight(body);
+
+    if (!(isSpeaking || isPaused) || highlightedSegmentIndex < 0 && !manualHighlightRange) return;
+
+    let range: { start: number; end: number } | null = null;
+    if (manualHighlightRange) {
+        range = manualHighlightRange;
+    } else if (highlightedSegmentIndex >= 0 && textSegments[highlightedSegmentIndex]) {
+        let cur = 0;
+        for (let i = 0; i < highlightedSegmentIndex; i++) cur += textSegments[i].length;
+        range = { start: cur, end: cur + textSegments[highlightedSegmentIndex].length };
+    }
+    if (!range) return;
+
+    const span = applyLiveRangeHighlight(body, range.start, range.end);
+    if (span) {
+        const elementRect = span.getBoundingClientRect();
+        const viewHeight = contents?.window?.innerHeight ?? 0;
+        if (elementRect.top < 0 || elementRect.bottom > viewHeight) {
+            span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+  }, [activeDoc?.type, highlightedSegmentIndex, isSpeaking, isPaused, manualHighlightRange, textSegments]);
+
+  // Resolves a pending "jump to this page" request for EPUB (see
+  // pendingEpubPageJumpRef above) once epub.js's own pagination pass has
+  // finished and a page number can actually be turned into a location -
+  // mirrors the same percentage-based math handleConfirmJump uses for the
+  // manual page-jump dialog.
+  useEffect(() => {
+    if (activeDoc?.type !== 'epub' || !isEpubReadyForJumping) return;
+    const pendingPage = pendingEpubPageJumpRef.current;
+    if (!pendingPage) return;
+    pendingEpubPageJumpRef.current = null;
+    const total = epubTotalPages;
+    if (total > 0) {
+        const percentage = Math.min(1, Math.max(0, (pendingPage - 1) / total));
+        epubRenditionRef.current?.display(percentage);
+    }
+  }, [activeDoc?.type, isEpubReadyForJumping, epubTotalPages]);
 
   const _startSpeech = useCallback(async (origin: SpeechOrigin, startIndex = 0, _isContinuing = false) => {
     if (!_isContinuing) {
@@ -1983,12 +2229,20 @@ HighlightableContent.displayName = 'HighlightableContent';
     if (textToFavorite) {
       const sourceName = activeDoc ? activeDoc.title : readerDict.scratchpad;
       const sourceId = activeDoc ? activeDoc.id : 'scratchpad';
+      // Record where this favorite was captured, so the favorites list can
+      // jump straight back to it in the reader instead of just opening the
+      // document at whatever page it was last left on.
       saveFavoriteItemRemote({
         id: Date.now().toString(),
         text: textToFavorite,
         sourceDocumentId: sourceId,
         sourceDocumentName: sourceName,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        sourcePageNumber: activeDoc?.type === 'pdf' ? currentPdfPageNum
+          : activeDoc?.type === 'epub' ? epubCurrentPageNum
+          : undefined,
+        sourceEpubCfi: activeDoc?.type === 'epub' ? (epubCurrentCfiRef.current || undefined) : undefined,
+        sourceChapterIndex: activeDoc?.type === 'mobi' ? mobiCurrentIndex : undefined,
       });
       toast({ title: favDict.title, description: `"${textToFavorite.substring(0, 50)}..." added.` });
     } else {
@@ -2239,8 +2493,14 @@ HighlightableContent.displayName = 'HighlightableContent';
        // is *displayed*), so this must not be gated on !isPdfTextView -
        // that used to tag every annotation added while in text-view mode
        // as page 1 no matter which page it was actually on.
+       // For MOBI, pageNumber isn't used to filter which annotations show
+       // (that's driven by whether the target text can still be found in
+       // the current chapter's text - see sortedAnnotations), so it's free
+       // to record the chapter index here instead, purely so the
+       // notes-favorites list can jump back to the right chapter.
        if (activeDoc?.type === 'pdf') pageNum = currentPdfPageNum;
        else if (activeDoc?.type === 'epub') pageNum = epubCurrentPageNum;
+       else if (activeDoc?.type === 'mobi') pageNum = mobiCurrentIndex;
 
       // Record the text immediately surrounding this selection so the
       // annotation can be re-located later by matching its neighbors, not
@@ -2259,6 +2519,7 @@ HighlightableContent.displayName = 'HighlightableContent';
         createdAt: id ? (activeDoc?.annotations?.find(a => a.id === id) || scratchpadAnnotations.find(a => a.id === id))?.createdAt || Date.now() : Date.now(),
         contextBefore,
         contextAfter,
+        epubCfi: activeDoc?.type === 'epub' ? (epubCurrentCfiRef.current || undefined) : undefined,
       };
   
       if (activeDoc) {

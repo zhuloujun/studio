@@ -14,6 +14,26 @@
 // far from what's actually on the server (e.g. edited from another device).
 import type { StoredMangaDocument } from '@/types';
 
+// A background refresh (see getDocumentById in indexedDBService.ts) can take
+// a while, and if the user saves an edit *while it's in flight*, the
+// refresh's older, pre-edit copy of the document must not be allowed to
+// land afterwards and silently wipe out that edit from the cache - that was
+// making edits "not save" in a very confusing, hard-to-reproduce way. Each
+// write bumps a per-id version counter; a background refresh records the
+// version it started at and only applies its result if nothing has written
+// to that id's cache since. This is in-memory (per tab) rather than
+// persisted, which is fine - it only needs to outlive a single in-flight
+// fetch, not a page reload.
+const cacheVersions = new Map<string, number>();
+
+export function getCacheVersion(id: string): number {
+  return cacheVersions.get(id) || 0;
+}
+
+function bumpCacheVersion(id: string): void {
+  cacheVersions.set(id, getCacheVersion(id) + 1);
+}
+
 const DB_NAME = 'MangaTalkDocumentCache';
 const STORE_NAME = 'documents';
 const DB_VERSION = 1;
@@ -80,6 +100,7 @@ async function evictLeastRecentlyUsed(db: IDBDatabase): Promise<void> {
 
 export async function setCachedDocument(doc: StoredMangaDocument): Promise<void> {
   if (typeof window === 'undefined') return;
+  bumpCacheVersion(doc.id);
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
@@ -92,6 +113,19 @@ export async function setCachedDocument(doc: StoredMangaDocument): Promise<void>
   } catch (e) {
     console.warn('[documentLocalCache] write failed', e);
   }
+}
+
+// setCachedDocument, but only applies if nothing has written to this id's
+// cache since `sinceVersion` (from getCacheVersion, captured before a
+// background refresh started). Use this for a background refresh's result
+// so it can never clobber a more recent local edit that happened while the
+// refresh was in flight.
+export async function setCachedDocumentIfNoNewerWrite(
+  doc: StoredMangaDocument,
+  sinceVersion: number
+): Promise<void> {
+  if (getCacheVersion(doc.id) !== sinceVersion) return;
+  await setCachedDocument(doc);
 }
 
 export async function clearCachedDocument(id: string): Promise<void> {

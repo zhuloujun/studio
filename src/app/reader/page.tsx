@@ -785,8 +785,35 @@ function collapseEpubWhitespace(text: string): string {
     return text.replace(/[ \t\r\n\f]+/g, ' ').trim();
 }
 
+// A plain TreeWalker over `root`'s text nodes, skipping any text inside a
+// previously-inserted annotation marker (see insertEpubAnnotationMarker's
+// `data-annotation-marker` sup below). A marker's own label ("1", "2", ...)
+// is real DOM text - without this, adding a second annotation near a first
+// one would count the first marker's label as if it were chapter content,
+// silently shifting the second marker's (and any playback highlight's)
+// position by however many marker-label characters happen to precede it.
+// This applies to every offset computation in this file (extraction and
+// both mapping directions), so markers can never contaminate themselves.
+function createEpubTextWalker(root: HTMLElement): TreeWalker {
+    return root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node: Node) {
+            const parent = (node as Text).parentElement;
+            if (parent && parent.closest('[data-annotation-marker="true"]')) {
+                return NodeFilter.FILTER_REJECT;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+        },
+    });
+}
+
 function extractEpubPlainText(root: HTMLElement): string {
-    return collapseEpubWhitespace(root.textContent || '');
+    let out = '';
+    const walker = createEpubTextWalker(root);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+        out += (node as Text).data;
+    }
+    return collapseEpubWhitespace(out);
 }
 
 // The inverse of extractEpubPlainText: given a character offset into the
@@ -794,8 +821,7 @@ function extractEpubPlainText(root: HTMLElement): string {
 // the real DOM node/offset that character actually lives at.
 function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Text; offset: number } | null {
     if (charIndex < 0) return null;
-    const doc = root.ownerDocument;
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = createEpubTextWalker(root);
     let collapsed = 0;
     let pendingSpace = false;
     let started = false;
@@ -839,8 +865,7 @@ function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Tex
 // per DOM node on every 'selectionchange' event, which was slow and
 // fragile enough to break selection outright; this is neither).
 function epubDomPositionToTextOffset(root: HTMLElement, targetNode: Node, targetOffset: number): number {
-    const doc = root.ownerDocument;
-    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = createEpubTextWalker(root);
     const targetIsText = targetNode.nodeType === Node.TEXT_NODE;
     let collapsed = 0;
     let pendingSpace = false;

@@ -48,6 +48,7 @@ import { getCloudSpeech, performOCR } from '@/app/actions';
 import * as LocalStorageService from '@/lib/localStorageService';
 import { saveFavoriteItemRemote, saveNoteFavoriteRemote } from '@/lib/authService';
 import * as IndexedDBService from '@/lib/indexedDBService';
+import { isEphemeralDocId } from '@/lib/ephemeralDocumentStore';
 import { initMobiFile, type Mobi, type MobiSpine, type MobiTocItem } from '@lingo-reader/mobi-parser';
 import type { TTSSettings, TTSVoice, StoredMangaDocument, ActiveMangaDocument, StoredPdfDocument, StoredImageDocument, StoredEpubDocument, StoredTxtDocument, StoredMobiDocument, FavoriteItem, Annotation, NoteFavoriteItem } from '@/types';
 import { cn } from '@/lib/utils';
@@ -323,6 +324,10 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   // range, meaning no highlight. Falling back to this cached range too lets
   // the highlight keep working on repeated presses of the same passage.
   const lastSpokenRangeRef = useRef<{ start: number; end: number } | null>(null);
+  // Debounces syncing the current PDF page number to the document's server
+  // metadata (lastPdfPageNum) so rapid page-flipping doesn't fire a PATCH
+  // per page - only the page the user actually settles on.
+  const pdfPageSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [isPerformingOcr, setIsPerformingOcr] = useState(false);
   const [currentTextForTTS, setCurrentTextForTTS] = useState<string>("");
@@ -460,34 +465,99 @@ const getCharPosition = (container: HTMLElement, charIndex: number): { top: numb
 // annotation's target text in the current text whenever the stored index no
 // longer points at it, and returns null (rather than a wrong guess) when
 // the text genuinely isn't there anymore.
+// How much text to remember on either side of a selection when the
+// annotation is created (see CONTEXT_WINDOW usage in handleSaveAnnotation).
+const ANNOTATION_CONTEXT_WINDOW = 40;
+// How much of the stored context has to actually match, at minimum, before
+// we trust a context-based match over the plain nearest-index fallback.
+const ANNOTATION_CONTEXT_MIN_SCORE = 6;
+
+// Scores how well `text`'s actual surroundings at `idx` (before finding
+// targetText there) match the context recorded when the annotation was
+// created, by counting how many characters of overlap there are, working
+// inward from the boundary on each side. Two matches that are both "close
+// enough" naturally get similar scores; a match whose neighboring words are
+// totally different from what was recorded scores ~0 regardless of how
+// close it happens to sit to the old startIndex.
+function scoreContextMatch(text: string, idx: number, targetLen: number, before?: string, after?: string): number {
+    let score = 0;
+    if (before) {
+        const actualBefore = text.slice(Math.max(0, idx - before.length), idx);
+        let i = actualBefore.length - 1;
+        let j = before.length - 1;
+        while (i >= 0 && j >= 0 && actualBefore[i] === before[j]) { score++; i--; j--; }
+    }
+    if (after) {
+        const actualAfter = text.slice(idx + targetLen, idx + targetLen + after.length);
+        let i = 0;
+        while (i < actualAfter.length && i < after.length && actualAfter[i] === after[i]) { score++; i++; }
+    }
+    return score;
+}
+
 function resolveAnnotationPosition(text: string, ann: Annotation): number | null {
     if (!text || !ann.targetText) return null;
     if (ann.startIndex >= 0) {
         const direct = text.substring(ann.startIndex, ann.startIndex + ann.targetText.length);
-        if (direct === ann.targetText) return ann.startIndex;
-    }
-    // The stored index no longer matches - re-locate it. Common words like
-    // "and" can occur dozens of times on one page, so grabbing the *first*
-    // occurrence (the old behavior) frequently landed the marker on a
-    // completely unrelated occurrence of the same word. Instead, scan every
-    // occurrence and pick the one closest to where it used to be - a much
-    // better bet when the surrounding text has only shifted slightly (a
-    // cross-device sync, a re-extraction, a nearby edit) rather than changed
-    // entirely.
-    let idx = text.indexOf(ann.targetText);
-    if (idx === -1) return null;
-    if (ann.startIndex >= 0) {
-        let best = idx;
-        let bestDist = Math.abs(idx - ann.startIndex);
-        let next = text.indexOf(ann.targetText, idx + 1);
-        while (next !== -1) {
-            const dist = Math.abs(next - ann.startIndex);
-            if (dist < bestDist) { best = next; bestDist = dist; }
-            next = text.indexOf(ann.targetText, next + 1);
+        if (direct === ann.targetText) {
+            // Even an exact offset match is worth double-checking against
+            // the recorded context when we have one and there's more than
+            // one occurrence on the page - two devices can each extract
+            // text that happens to line up numerically at the same offset
+            // for a *different* occurrence of a short/common target (e.g.
+            // "and") once upstream content differs even slightly.
+            if ((ann.contextBefore || ann.contextAfter) && text.indexOf(ann.targetText, ann.startIndex + 1) !== -1) {
+                const directScore = scoreContextMatch(text, ann.startIndex, ann.targetText.length, ann.contextBefore, ann.contextAfter);
+                if (directScore >= ANNOTATION_CONTEXT_MIN_SCORE || (!ann.contextBefore && !ann.contextAfter)) {
+                    return ann.startIndex;
+                }
+                // Fall through to the full occurrence scan below, which will
+                // consider this same index as one of the candidates anyway.
+            } else {
+                return ann.startIndex;
+            }
         }
-        idx = best;
     }
-    return idx;
+    // The stored index no longer matches directly - re-locate it. Common
+    // words like "and" can occur dozens of times on one page, so grabbing
+    // the *first* occurrence (the old behavior) frequently landed the
+    // marker on a completely unrelated occurrence of the same word, and
+    // even "closest to the old numeric offset" (a later fix) can pick the
+    // wrong one when the two devices' text hasn't shifted uniformly.
+    // Preferred, when we have it: pick whichever occurrence's actual
+    // surrounding text best matches what was recorded at creation time -
+    // this only depends on nearby words still being nearby, not on any
+    // offset lining up numerically. Falls back to nearest-offset for older
+    // annotations saved before context was recorded.
+    const occurrences: number[] = [];
+    let scan = text.indexOf(ann.targetText);
+    while (scan !== -1) {
+        occurrences.push(scan);
+        scan = text.indexOf(ann.targetText, scan + 1);
+    }
+    if (occurrences.length === 0) return null;
+    if (occurrences.length === 1) return occurrences[0];
+
+    if (ann.contextBefore || ann.contextAfter) {
+        let bestIdx = occurrences[0];
+        let bestScore = -1;
+        for (const occ of occurrences) {
+            const score = scoreContextMatch(text, occ, ann.targetText.length, ann.contextBefore, ann.contextAfter);
+            if (score > bestScore) { bestScore = score; bestIdx = occ; }
+        }
+        if (bestScore >= ANNOTATION_CONTEXT_MIN_SCORE) return bestIdx;
+    }
+
+    if (ann.startIndex >= 0) {
+        let best = occurrences[0];
+        let bestDist = Math.abs(best - ann.startIndex);
+        for (const occ of occurrences) {
+            const dist = Math.abs(occ - ann.startIndex);
+            if (dist < bestDist) { best = occ; bestDist = dist; }
+        }
+        return best;
+    }
+    return occurrences[0];
 }
 
 const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: React.RefObject<HTMLElement>, annotations: Annotation[], text: string }) => {
@@ -854,8 +924,15 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
               setIsPdfTextView(false);
               setPdfDocProxy(pdf);
               setPdfTotalPages(pdf.numPages);
+              // Prefer the page synced to the document's own metadata (set
+              // by whichever device last read it) over this browser's local
+              // memory of the page, so opening the same document elsewhere
+              // resumes at the same spot instead of showing a different,
+              // possibly-never-visited page on this device by default.
+              const syncedPageNum = (doc as StoredPdfDocument).lastPdfPageNum;
               const savedPageIndex = LocalStorageService.loadCurrentPdfPageIndexForDoc(doc.id);
-              setCurrentPdfPageNum((savedPageIndex > 0 && savedPageIndex <= pdf.numPages) ? savedPageIndex : 1);
+              const initialPageNum = syncedPageNum || savedPageIndex || 1;
+              setCurrentPdfPageNum((initialPageNum > 0 && initialPageNum <= pdf.numPages) ? initialPageNum : 1);
             } catch (pdfError: any) {
               if (isStale) return;
               console.error("Error processing PDF:", pdfError);
@@ -1108,6 +1185,21 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
         setPdfPageIsTextBased(true); 
         setCurrentTextForTTS(`${readerDict.loadingContent} ${currentPdfPageNum}...`);
         LocalStorageService.saveCurrentPdfPageIndexForDoc(activeDoc.id, currentPdfPageNum);
+
+        // Also sync the page to the document's own metadata (debounced) so
+        // opening it on another device resumes here too, instead of only
+        // remembering the page in this browser's local storage.
+        if (!isEphemeralDocId(activeDoc.id)) {
+            const docForSync = activeDoc;
+            const pageNumToSync = currentPdfPageNum;
+            if (pdfPageSyncTimeoutRef.current) clearTimeout(pdfPageSyncTimeoutRef.current);
+            pdfPageSyncTimeoutRef.current = setTimeout(() => {
+                IndexedDBService.updateDocumentMetadata(
+                    docForSync,
+                    { lastPdfPageNum: pageNumToSync }
+                ).catch(() => { /* best-effort - not worth surfacing an error for */ });
+            }, 800);
+        }
 
         try {
             const page: PDFPageProxy = await pdfDocProxy.getPage(currentPdfPageNum);
@@ -2052,6 +2144,13 @@ HighlightableContent.displayName = 'HighlightableContent';
        if (activeDoc?.type === 'pdf' && !isPdfTextView) pageNum = currentPdfPageNum;
        else if (activeDoc?.type === 'epub') pageNum = epubCurrentPageNum;
 
+      // Record the text immediately surrounding this selection so the
+      // annotation can be re-located later by matching its neighbors, not
+      // just a raw character offset - see resolveAnnotationPosition.
+      const contextSourceText = activeDoc ? currentTextForTTS : scratchpadText;
+      const contextBefore = contextSourceText.slice(Math.max(0, startIndex - ANNOTATION_CONTEXT_WINDOW), startIndex) || undefined;
+      const contextAfter = contextSourceText.slice(startIndex + text.length, startIndex + text.length + ANNOTATION_CONTEXT_WINDOW) || undefined;
+
       const newOrUpdatedAnnotation: Annotation = {
         id: id || `ann_${Date.now()}`,
         pageNumber: pageNum,
@@ -2060,6 +2159,8 @@ HighlightableContent.displayName = 'HighlightableContent';
         note,
         imageDataUrl: imageDataUrl || '',
         createdAt: id ? (activeDoc?.annotations?.find(a => a.id === id) || scratchpadAnnotations.find(a => a.id === id))?.createdAt || Date.now() : Date.now(),
+        contextBefore,
+        contextAfter,
       };
   
       if (activeDoc) {
@@ -2135,9 +2236,15 @@ HighlightableContent.displayName = 'HighlightableContent';
   
   const handleEditAnnotation = (annotation: Annotation) => {
     setViewingAnnotation(null);
+    // Resolve against the current text rather than trusting the raw stored
+    // startIndex - editing an annotation whose position had drifted used to
+    // re-save it with that same stale (or now-wrong) index, baking the
+    // mistake in instead of correcting it.
+    const contextSourceText = activeDoc ? currentTextForTTS : scratchpadText;
+    const resolved = resolveAnnotationPosition(contextSourceText, annotation);
     setSelectionForAnnotation({
         text: annotation.targetText,
-        startIndex: annotation.startIndex
+        startIndex: resolved !== null ? resolved : annotation.startIndex
     });
     setAnnotationDialog({
       open: true,
@@ -2167,6 +2274,11 @@ HighlightableContent.displayName = 'HighlightableContent';
             // devices at all).
             let metadataOnlyPatch: Partial<StoredMangaDocument> | null = null;
             let fileChanged = false;
+            // Which single page's OCR text is being edited, for the
+            // post-save verification below - only meaningful for the PDF
+            // image-mode branch.
+            let editedPdfPageNum: number | null = null;
+            const editedTextSnapshot = currentTextForTTS;
 
             if (updatedDoc.type === 'image') {
                 updatedDoc.extractedText = currentTextForTTS;
@@ -2174,10 +2286,12 @@ HighlightableContent.displayName = 'HighlightableContent';
                 docNeedsSave = true;
             } else if (updatedDoc.type === 'pdf' && !isPdfTextView) {
                 const pageNum = currentPdfPageNum;
-                if (!updatedDoc.ocrTextPerPage) {
-                    updatedDoc.ocrTextPerPage = {};
-                }
-                updatedDoc.ocrTextPerPage[pageNum] = currentTextForTTS;
+                editedPdfPageNum = pageNum;
+                // Clone rather than mutate activeDoc's own ocrTextPerPage
+                // object in place (updatedDoc is only a shallow copy of
+                // activeDoc, so without this, activeDoc.ocrTextPerPage
+                // would end up mutated too, even before the save succeeds).
+                updatedDoc.ocrTextPerPage = { ...(updatedDoc.ocrTextPerPage || {}), [pageNum]: currentTextForTTS };
                 metadataOnlyPatch = { ocrTextPerPage: updatedDoc.ocrTextPerPage };
                 docNeedsSave = true;
             } else if (updatedDoc.type === 'txt' || (updatedDoc.type === 'pdf' && isPdfTextView) || updatedDoc.type === 'mobi') {
@@ -2199,6 +2313,34 @@ HighlightableContent.displayName = 'HighlightableContent';
                         await IndexedDBService.updateDocumentMetadata(updatedDoc, metadataOnlyPatch);
                     }
                     setActiveDoc(updatedDoc);
+
+                    // Don't just trust the PATCH's HTTP success - actually
+                    // re-fetch the document from the server and confirm the
+                    // edited page's text is really there. Several rounds of
+                    // "the edit doesn't save" reports turned out impossible
+                    // to reproduce by reading the save code alone, so rather
+                    // than guess again, this makes a real failure (a flaky
+                    // connection, a write that silently no-ops, etc.) show
+                    // up as a visible error instead of quietly vanishing -
+                    // which is the only way to actually pin down what's
+                    // failing if it still happens.
+                    if (!isEphemeralDocId(updatedDoc.id)) {
+                        try {
+                            const verifyRes = await fetch(`/api/documents/${encodeURIComponent(updatedDoc.id)}`, { credentials: 'include', cache: 'no-store' });
+                            const verifyData = (await verifyRes.json().catch(() => ({}))) as any;
+                            const savedOk = verifyData?.success && (
+                                editedPdfPageNum !== null
+                                    ? verifyData.document?.ocrTextPerPage?.[editedPdfPageNum] === editedTextSnapshot
+                                    : (verifyData.document?.extractedText === editedTextSnapshot || fileChanged)
+                            );
+                            if (!savedOk) {
+                                toast({ variant: "destructive", title: "Save Verification Failed", description: "The edit was sent, but the server doesn't show it saved yet. Please try saving again, and check your connection." });
+                                return;
+                            }
+                        } catch {
+                            // Verification itself failing (e.g. offline) isn't proof the save failed - don't false-alarm over it.
+                        }
+                    }
                     toast({ title: "Changes Saved", description: "Your edits have been saved and synced." });
                 } catch (e: any) {
                     toast({ variant: "destructive", title: "Save Error", description: `Could not save changes: ${e.message}` });

@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useEffect, useRef, useContext } from 'react';
@@ -16,7 +15,7 @@ import * as LocalStorageService from '@/lib/localStorageService';
 import type { StoredMangaDocument } from '@/types';
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist';
 import { searchExternalLiterature, fetchExternalDocument, type ExternalSearchResult } from '@/lib/externalLiteratureService';
-import { setEphemeralDocument } from '@/lib/ephemeralDocumentStore';
+import { openEphemeralDocumentWithSync } from '@/lib/ephemeralDocumentStore';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -202,7 +201,7 @@ function LibraryPageContent() {
     setOpeningExternalId(result.id);
     try {
       const doc = await fetchExternalDocument(result);
-      const stored = await setEphemeralDocument(doc);
+      const stored = await openEphemeralDocumentWithSync(doc);
       if (!stored) {
         toast({
           variant: 'destructive',

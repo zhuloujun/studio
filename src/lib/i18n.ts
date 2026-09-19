@@ -1,4 +1,3 @@
-
 import type { Locale } from '@/context/LanguageContext';
 
 const dictionaries: Record<Locale, any> = {
@@ -464,7 +463,7 @@ const dictionaries: Record<Locale, any> = {
         documentSavedMessage: "\"{title}\" 已保存。",
         uploadError: "上传并保存时出错",
         uploadErrorMessage: "处理/保存 \"{name}\" 失败。{message}",
-        storedDocumentsTitle: "存储在此浏览器中的文档",
+        storedDocumentsTitle: "储存列表",
         storedDocumentsDescription: "此浏览器中的文档列表。点击“在阅读器中打开”以查看。",
         refreshList: "刷新列表",
         loadingDocuments: "正在加载文档...",

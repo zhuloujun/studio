@@ -4,8 +4,10 @@ import { useState, useEffect, useCallback, useRef, useContext } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
-import { Play, Trash2, Loader2, Pause, Smartphone, Cloud as CloudIcon, Info, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, FileText } from 'lucide-react';
+import { Play, Trash2, Loader2, Pause, Smartphone, Cloud as CloudIcon, Info, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, FileText, BookOpen } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import * as LocalStorage from '@/lib/localStorageService';
+import { documentExists } from '@/lib/indexedDBService';
 import { fetchFavoriteItems, deleteFavoriteItemRemote } from '@/lib/authService';
 import type { FavoriteItem, TTSVoice, PlaybackMode } from '@/types';
 import { format } from 'date-fns';
@@ -47,10 +49,12 @@ const groupVoicesByLanguage = (voices: TTSVoice[]) => {
 
 function FavoritesPageContent() {
   const { toast } = useToast();
+  const router = useRouter();
   const [favoriteItems, setFavoriteItems] = useState<FavoriteItem[]>([]);
   const [itemToDelete, setItemToDelete] = useState<FavoriteItem | null>(null);
   const [availableVoices, setAvailableVoices] = useState<TTSVoice[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
+  const [jumpingItemId, setJumpingItemId] = useState<string | null>(null);
 
   const { locale } = useContext(LanguageContext);
   const dictionary = getDictionary(locale);
@@ -129,6 +133,33 @@ function FavoritesPageContent() {
         const fullPlaylist = favoriteItems.map(fav => ({ type: 'favorite' as const, item: fav }));
         const startIndex = favoriteItems.findIndex(fav => fav.id === item.id);
         play({ type: 'favorite', item }, fullPlaylist, startIndex);
+    }
+  };
+
+  // Jumps back to the exact spot in the reader this favorite was captured
+  // from. Checks the source document still exists first (a lightweight
+  // metadata-only check, not a full file download) so a deleted document
+  // shows a clear message here instead of navigating into a broken reader
+  // page.
+  const handleJumpToSource = async (item: FavoriteItem) => {
+    if (!item.sourceDocumentId || item.sourceDocumentId === 'scratchpad') {
+      router.push('/reader');
+      return;
+    }
+    setJumpingItemId(item.id);
+    try {
+      const exists = await documentExists(item.sourceDocumentId);
+      if (!exists) {
+        toast({ variant: 'destructive', title: '原文献已被删除', description: '无法跳转，原文献已经被删除。' });
+        return;
+      }
+      const params = new URLSearchParams({ docId: item.sourceDocumentId });
+      if (item.sourcePageNumber) params.set('page', String(item.sourcePageNumber));
+      if (item.sourceEpubCfi) params.set('cfi', item.sourceEpubCfi);
+      if (item.sourceChapterIndex !== undefined) params.set('chapter', String(item.sourceChapterIndex));
+      router.push(`/reader?${params.toString()}`);
+    } finally {
+      setJumpingItemId(null);
     }
   };
 
@@ -465,6 +496,17 @@ function FavoritesPageContent() {
                                 className="w-[80px] h-8 text-xs"
                                 >
                                 {buttonIcon} {buttonText}
+                                </Button>
+                                <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-8 w-8"
+                                onClick={() => handleJumpToSource(item)}
+                                disabled={jumpingItemId === item.id}
+                                aria-label="Jump to source in reader"
+                                title="跳转回原文献位置"
+                                >
+                                {jumpingItemId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <BookOpen className="h-4 w-4" />}
                                 </Button>
                                 <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setItemToDelete(item)} disabled={isLoading && isCurrentlyPlaying} aria-label="Delete Favorite">
                                 <Trash2 className="h-4 w-4 text-destructive" />

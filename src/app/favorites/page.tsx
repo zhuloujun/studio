@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { useToast } from '@/hooks/use-toast';
 import { Play, Trash2, Loader2, Pause, Smartphone, Cloud as CloudIcon, Info, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, FileText } from 'lucide-react';
 import * as LocalStorage from '@/lib/localStorageService';
+import { fetchFavoriteItems, deleteFavoriteItemRemote } from '@/lib/authService';
 import type { FavoriteItem, TTSVoice, PlaybackMode } from '@/types';
 import { format } from 'date-fns';
 import { Label } from '@/components/ui/label';
@@ -86,7 +87,7 @@ function FavoritesPageContent() {
 
   // Load initial settings and favorite items
   useEffect(() => {
-    setFavoriteItems(LocalStorage.loadFavoriteItems());
+    fetchFavoriteItems().then(setFavoriteItems);
     setPlaybackMode(LocalStorage.loadFavoritesPlaybackMode());
 
     const loadedSettings = LocalStorage.loadTTSSettings();
@@ -189,17 +190,19 @@ function FavoritesPageContent() {
     }
   }, [availableVoices, ttsSettings.language, ttsSettings.voiceURI, ttsSettings.engine, setTtsSettings]);
   
-  const performDelete = () => {
+  const performDelete = async () => {
     if (!itemToDelete) return;
     if (currentItem?.item.id === itemToDelete.id) stop();
-    LocalStorage.deleteFavoriteItem(itemToDelete.id);
-    const updatedItems = LocalStorage.loadFavoriteItems();
-    setFavoriteItems(updatedItems);
+    const deletedId = itemToDelete.id;
+    // Optimistic update - reflect the removal immediately, then reconcile
+    // with the server (which is the source of truth across devices).
+    setFavoriteItems(prev => prev.filter(item => item.id !== deletedId));
     if (paginatedItems.length === 1 && currentPage > 1) {
         setCurrentPage(currentPage - 1);
     }
     toast({ title: favDict.favoriteRemoved });
     setItemToDelete(null);
+    await deleteFavoriteItemRemote(deletedId);
   };
   
   const handleSettingChange = (key: any, value: any) => {

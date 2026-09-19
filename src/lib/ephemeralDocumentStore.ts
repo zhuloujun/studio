@@ -15,6 +15,7 @@
 //     and has a much larger quota (typically a large fraction of free disk
 //     space) so problem #2 goes away too.
 import type { StoredMangaDocument } from '@/types';
+import { fetchEphemeralDocState, saveEphemeralDocStateRemote, type EphemeralDocState } from '@/lib/authService';
 
 const DB_NAME = 'MangaTalkEphemeralDocs';
 const STORE_NAME = 'documents';
@@ -60,6 +61,24 @@ async function cleanupOldEntries(db: IDBDatabase): Promise<void> {
   }
 }
 
+// The file bytes for these documents are never uploaded (that's the whole
+// point of "ephemeral"), but the notes/annotations and TTS-box text edits a
+// user makes while reading one are small and worth syncing across devices
+// on their own - keyed by the same deterministic search-result id (e.g.
+// "arxiv-2401.01234") so re-opening the same paper elsewhere can pick them
+// back up. Best-effort and fire-and-forget: a failed sync should never block
+// or fail the local save, which is what actually keeps the reader working.
+function syncEphemeralStateToServer(doc: StoredMangaDocument): void {
+  const state: EphemeralDocState = {
+    annotations: doc.annotations,
+    ocrTextPerPage: (doc as any).ocrTextPerPage,
+    extractedText: (doc as any).extractedText,
+  };
+  saveEphemeralDocStateRemote(doc.id, state).catch((e) => {
+    console.warn('[ephemeralDocumentStore] failed to sync state to server', e);
+  });
+}
+
 /** Returns false if the document couldn't be stored. */
 export async function setEphemeralDocument(doc: StoredMangaDocument): Promise<boolean> {
   if (typeof window === 'undefined') return false;
@@ -72,11 +91,33 @@ export async function setEphemeralDocument(doc: StoredMangaDocument): Promise<bo
       tx.onerror = () => reject(tx.error);
     });
     cleanupOldEntries(db).finally(() => db.close());
+    syncEphemeralStateToServer(doc);
     return true;
   } catch (e) {
     console.error('[ephemeralDocumentStore] failed to store document', e);
     return false;
   }
+}
+
+// Called once, right when a search result is first opened in the reader
+// (before anything has been edited yet) - overlays any notes/edits synced
+// from another device on top of the freshly-fetched document so they show
+// up immediately instead of only after the user happens to edit something
+// on this device too.
+export async function openEphemeralDocumentWithSync(doc: StoredMangaDocument): Promise<boolean> {
+  try {
+    const remoteState = await fetchEphemeralDocState(doc.id);
+    if (remoteState) {
+      const merged: StoredMangaDocument = { ...doc };
+      if (remoteState.annotations) merged.annotations = remoteState.annotations;
+      if (remoteState.ocrTextPerPage) (merged as any).ocrTextPerPage = remoteState.ocrTextPerPage;
+      if (remoteState.extractedText !== undefined) (merged as any).extractedText = remoteState.extractedText;
+      return await setEphemeralDocument(merged);
+    }
+  } catch (e) {
+    console.warn('[ephemeralDocumentStore] failed to fetch synced state, opening without it', e);
+  }
+  return await setEphemeralDocument(doc);
 }
 
 export async function getEphemeralDocument(id: string): Promise<StoredMangaDocument | undefined> {

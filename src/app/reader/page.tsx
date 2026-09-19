@@ -333,6 +333,17 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   // in the meantime; the effect below fires the jump once pagination is
   // ready and clears it.
   const pendingEpubPageJumpRef = useRef<number | null>(null);
+  // Mirrors the latest selection made directly inside any EPUB chapter
+  // iframe, kept in sync via a 'selectionchange' listener attached to each
+  // chapter's document (see the 'rendered' handler below) rather than read
+  // fresh only at the moment a toolbar button is clicked. Reading it fresh
+  // at click time is what MOBI/DOCX/TXT/PDF-text already do successfully,
+  // but an EPUB chapter iframe can lose its internal selection between the
+  // user finishing their selection and actually clicking a toolbar button
+  // in the parent document (a blur on the iframe's own window, which a
+  // mousedown preventDefault on the *button* doesn't protect against,
+  // unlike a same-document text selection) - this ref survives that.
+  const epubLastSelectionRef = useRef<{ text: string; startIndex: number } | null>(null);
   const [isEpubPaginating, setIsEpubPaginating] = useState(true);
   const [isEpubReadyForJumping, setIsEpubReadyForJumping] = useState(false);
   const [epubToc, setEpubToc] = useState<any[]>([]); // For EPUB table of contents
@@ -690,6 +701,15 @@ function applyLiveRangeHighlight(root: HTMLElement, start: number, end: number):
 
         const span = doc.createElement('span');
         span.className = 'text-green-600 bg-green-600/10';
+        // Also set the equivalent inline styles directly, not just the
+        // Tailwind utility classes above: this same function is used to
+        // highlight text inside an EPUB chapter's iframe (a completely
+        // separate document from the app page), which has no Tailwind
+        // stylesheet loaded at all - the class names alone were being
+        // added to the DOM but rendering as plain unstyled text there.
+        // Inline styles work regardless of which document this runs in.
+        span.style.color = '#16a34a';
+        span.style.backgroundColor = 'rgba(22, 163, 74, 0.1)';
         span.setAttribute('data-highlight-target', 'true');
         // surroundContents throws if the range's boundary points partially
         // select a non-Text node (e.g. it straddles into/out of a <strong>)
@@ -717,6 +737,53 @@ function clearLiveRangeHighlight(root: HTMLElement) {
             parent.normalize();
         });
     } catch { /* best-effort cleanup only */ }
+}
+
+// EPUB's main view has no AnnotationMarkers overlay at all (that component
+// positions markers with absolute CSS in the *parent* document, which can't
+// reach across into an iframe's own coordinate space without a lot of
+// cross-frame offset math) - annotations added there previously saved fine,
+// but had no visible number marker anywhere. Instead of positioning markers
+// over the iframe, this inserts small clickable marker elements directly
+// INTO the chapter iframe's own document, right at each annotation's
+// resolved position - sidestepping the cross-frame positioning problem
+// entirely, using the same text-node/offset walking approach as
+// applyLiveRangeHighlight.
+function clearEpubAnnotationMarkers(root: HTMLElement) {
+    try {
+        root.querySelectorAll('[data-annotation-marker="true"]').forEach((el) => el.remove());
+    } catch { /* best-effort cleanup only */ }
+}
+
+function insertEpubAnnotationMarker(root: HTMLElement, charIndex: number, label: string, onClick: () => void): void {
+    if (charIndex < 0) return;
+    const doc = root.ownerDocument;
+    try {
+        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let cur = 0;
+        let node: Node | null;
+        while ((node = walker.nextNode())) {
+            const textNode = node as Text;
+            const len = textNode.data.length;
+            if (cur + len >= charIndex) {
+                const offset = Math.max(0, Math.min(len, charIndex - cur));
+                const range = doc.createRange();
+                range.setStart(textNode, offset);
+                range.collapse(true);
+                const marker = doc.createElement('sup');
+                marker.textContent = label;
+                marker.setAttribute('data-annotation-marker', 'true');
+                marker.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;' +
+                    'width:16px;height:16px;min-width:16px;border-radius:9999px;background:#0f172a;' +
+                    'color:#fff;font-size:10px;line-height:1;font-family:sans-serif;cursor:pointer;' +
+                    'margin:0 2px;vertical-align:middle;user-select:none;';
+                marker.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+                range.insertNode(marker);
+                return;
+            }
+            cur += len;
+        }
+    } catch { /* skip this annotation rather than crash the whole pass */ }
 }
 
 function wrapHtmlRangeWithHighlight(html: string, start: number, end: number): string {
@@ -938,6 +1005,18 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                     return { text: range.toString(), startIndex: preSelectionRange.toString().length };
                 }
                 return { text: epubSelection.toString(), startIndex: null };
+            }
+
+            // No iframe currently reports a live selection - the button
+            // click's own mousedown/focus shift can clear an EPUB iframe's
+            // internal selection even with preventDefault() on the button
+            // (that only protects the outer page's selection), which the
+            // other formats don't run into since their selection lives in
+            // the same document as the button. Fall back to the most
+            // recent selection this book's chapters reported, captured
+            // continuously via 'selectionchange' - see epubLastSelectionRef.
+            if (epubLastSelectionRef.current) {
+                return epubLastSelectionRef.current;
             }
         } catch (e) { console.warn("Could not get selection from EPUB iframe", e); }
     }
@@ -1210,6 +1289,25 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                       if (xDiff > 0) navigateEpub('next');
                       else navigateEpub('prev');
                   };
+                  const onEpubIframeSelectionChange = (event: Event) => {
+                      const doc = event.target as Document;
+                      const win = doc?.defaultView;
+                      const sel = win?.getSelection?.();
+                      const body = doc?.body;
+                      if (!sel || !body || sel.isCollapsed || !sel.toString() || !sel.rangeCount) {
+                          epubLastSelectionRef.current = null;
+                          return;
+                      }
+                      try {
+                          const range = sel.getRangeAt(0);
+                          if (!body.contains(range.startContainer)) return;
+                          const preSelectionRange = range.cloneRange();
+                          preSelectionRange.selectNodeContents(body);
+                          preSelectionRange.setEnd(range.startContainer, range.startOffset);
+                          epubLastSelectionRef.current = { text: range.toString(), startIndex: preSelectionRange.toString().length };
+                      } catch { /* keep the previous value on failure */ }
+                  };
+
                   rendition.on('rendered', (_section: any, view: any) => {
                       const iframeDoc: Document | undefined = view?.contents?.document;
                       if (!iframeDoc) return;
@@ -1218,6 +1316,7 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                       // its listeners) is simply discarded with the iframe.
                       iframeDoc.addEventListener('touchstart', onEpubIframeTouchStart, { passive: true });
                       iframeDoc.addEventListener('touchend', onEpubIframeTouchEnd, { passive: true });
+                      iframeDoc.addEventListener('selectionchange', onEpubIframeSelectionChange);
                   });
 
                   rendition.on('displayed', async (view: any) => {
@@ -2017,6 +2116,45 @@ HighlightableContent.displayName = 'HighlightableContent';
         }
     }
   }, [activeDoc?.type, highlightedSegmentIndex, isSpeaking, isPaused, manualHighlightRange, textSegments]);
+
+  // Inserts a numbered marker into the current EPUB chapter's iframe for
+  // each annotation on it (see insertEpubAnnotationMarker above for why this
+  // lives inside the iframe's own document instead of being positioned over
+  // it like AnnotationMarkers does for the other formats).
+  useEffect(() => {
+    if (activeDoc?.type !== 'epub') return;
+    const rendition = epubRenditionRef.current;
+    if (!rendition) return;
+    const contents = getEpubVisibleContentsList(rendition)[0];
+    const body: HTMLElement | undefined = contents?.document?.body;
+    if (!body) return;
+
+    clearEpubAnnotationMarkers(body);
+    if (sortedAnnotations.length === 0 || !currentTextForTTS) return;
+
+    // Marker labels are 1-based positions in sortedAnnotations (its own
+    // order is already sorted by startIndex), but they must be *inserted*
+    // into the live DOM from the end of the chapter backwards - inserting
+    // one marker's label text shifts every character position after it, so
+    // processing in descending charIndex order means each insertion never
+    // disturbs the position still to be computed for an earlier
+    // (smaller-offset) marker.
+    const targets = sortedAnnotations
+        .map((ann, index) => {
+            const resolvedStart = resolveAnnotationPosition(currentTextForTTS, ann);
+            if (resolvedStart === null) return null;
+            // Same convention AnnotationMarkers uses: place the marker at
+            // the end of the annotated text, not its start.
+            return { charIndex: resolvedStart + ann.targetText.length, label: String(index + 1) };
+        })
+        .filter((t): t is { charIndex: number; label: string } => t !== null)
+        .sort((a, b) => b.charIndex - a.charIndex);
+
+    targets.forEach(({ charIndex, label }) => {
+        const ann = sortedAnnotations[Number(label) - 1];
+        insertEpubAnnotationMarker(body, charIndex, label, () => setViewingAnnotation(ann));
+    });
+  }, [activeDoc?.type, sortedAnnotations, currentTextForTTS]);
 
   // Resolves a pending "jump to this page" request for EPUB (see
   // pendingEpubPageJumpRef above) once epub.js's own pagination pass has

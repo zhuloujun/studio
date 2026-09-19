@@ -280,6 +280,30 @@ export const deleteNoteFavoriteRemote = async (id: string): Promise<boolean> => 
   }
 };
 
+// Cross-device sync for notes/edits made on documents opened from "search
+// external literature" (see ephemeralDocumentStore.ts) - the file itself
+// stays local-only, but the small amount of annotation/OCR-text state a
+// user builds up while reading is worth syncing on its own.
+export type EphemeralDocState = {
+  annotations?: import('@/types').Annotation[];
+  ocrTextPerPage?: Record<number, string>;
+  extractedText?: string;
+};
+
+export const fetchEphemeralDocState = async (id: string): Promise<EphemeralDocState | null> => {
+  try {
+    const res = await fetch(`/api/ephemeral-doc-state/${encodeURIComponent(id)}`, { credentials: 'include' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { success: boolean; state?: EphemeralDocState | null };
+    return data.success ? data.state || null : null;
+  } catch {
+    return null;
+  }
+};
+
+export const saveEphemeralDocStateRemote = (id: string, state: EphemeralDocState) =>
+  postJson<ApiResult>(`/api/ephemeral-doc-state/${encodeURIComponent(id)}`, state);
+
 export const getMyStorageUsage = async (): Promise<{ usedBytes: number; quotaBytes: number; percentage: number } | null> => {
   try {
     const res = await fetch('/api/storage/usage', { credentials: 'include' });

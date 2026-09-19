@@ -762,6 +762,30 @@ const EPUB_BLOCK_TAGS = new Set([
     'BLOCKQUOTE', 'TR', 'TABLE', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'BR',
 ]);
 
+// Whether `el` should insert a paragraph break in walkEpubPlainText.
+// Prefers the element's actual computed `display` (what innerText itself
+// goes by) over a static tag-name guess - some EPUB conversions wrap each
+// original scanned line, footnote marker, or even individual word in a
+// <div>/<p> purely for styling, with CSS forcing it to lay out inline; a
+// tag-name-only check inserted a break there anyway, fragmenting a single
+// sentence into a break-separated run of one or two words each. Falls back
+// to the tag whitelist only if computed style isn't available (e.g. no
+// window on this document for some reason).
+function isEpubBlockBoundary(el: Element): boolean {
+    if (el.tagName === 'BR') return true;
+    const view = el.ownerDocument?.defaultView;
+    if (view) {
+        try {
+            const display = view.getComputedStyle(el).display;
+            if (display) {
+                return display === 'block' || display === 'list-item' || display === 'table' ||
+                    display === 'table-row' || display === 'flex' || display === 'grid';
+            }
+        } catch { /* fall through to the tag-based guess below */ }
+    }
+    return EPUB_BLOCK_TAGS.has(el.tagName);
+}
+
 // Walks every text node under `root` in document order, calling
 // `onSegment(text, node)` for each one - and, once real content has
 // started, also for a synthetic "\n" (node: null) whenever a block-level
@@ -784,7 +808,7 @@ function walkEpubPlainText(root: HTMLElement, onSegment: (text: string, node: Te
                 started = true;
             }
             if (onSegment(text, node as Text)) return;
-        } else if (node.nodeType === Node.ELEMENT_NODE && EPUB_BLOCK_TAGS.has((node as Element).tagName)) {
+        } else if (node.nodeType === Node.ELEMENT_NODE && isEpubBlockBoundary(node as Element)) {
             if (started) {
                 if (onSegment('\n', null)) return;
             }
@@ -829,6 +853,55 @@ function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Tex
         result = { node: lastText, offset: (lastText as Text).data.length };
     }
     return result;
+}
+
+// The other direction from findEpubTextPosition: given a live selection's
+// (startContainer, startOffset) inside `root`, returns that position's
+// offset into extractEpubPlainText(root)'s string. A selection's start
+// index used to be computed as `Range.toString().length` of everything
+// before it - a plain concatenation of raw text with no paragraph-break
+// characters - which drifted out of sync with currentTextForTTS/
+// findEpubTextPosition (built with synthetic "\n"s) by one character per
+// block boundary crossed before the selection, same root cause as the
+// marker-position bug this replaced. Walking with the exact same
+// walkEpubPlainText sequence keeps a selection's offset in the same space
+// as everything else, so "repeat"/"play from selection" land on the actual
+// selected text instead of drifting earlier with every paragraph in between.
+function epubDomPositionToTextOffset(root: HTMLElement, targetNode: Node, targetOffset: number): number {
+    const doc = root.ownerDocument;
+    let preRange: Range;
+    try {
+        preRange = doc.createRange();
+        preRange.setStart(root, 0);
+        preRange.setEnd(targetNode, targetOffset);
+    } catch {
+        return 0;
+    }
+    let cur = 0;
+    let result: number | null = null;
+    walkEpubPlainText(root, (text, node) => {
+        if (!node) { cur += text.length; return false; }
+        let startCmp: number;
+        try { startCmp = preRange.comparePoint(node, 0); } catch { startCmp = -1; }
+        if (startCmp > 0) {
+            // This node starts after the target position - the target must
+            // fall at or before everything accumulated so far.
+            result = cur;
+            return true;
+        }
+        let endCmp: number;
+        try { endCmp = preRange.comparePoint(node, text.length); } catch { endCmp = 1; }
+        if (endCmp >= 0) {
+            // The target position falls inside (or right at the end of)
+            // this text node.
+            const within = (node === targetNode) ? Math.max(0, Math.min(text.length, targetOffset)) : text.length;
+            result = cur + within;
+            return true;
+        }
+        cur += text.length;
+        return false;
+    });
+    return result !== null ? result : cur;
 }
 
 // EPUB-specific equivalent of applyLiveRangeHighlight below, built on
@@ -898,11 +971,21 @@ function insertEpubAnnotationMarker(root: HTMLElement, charIndex: number, label:
         const isDarkTheme = typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
         const bg = isDarkTheme ? 'hsl(18, 56%, 65%)' : 'hsl(18, 56%, 75%)';
         const fg = isDarkTheme ? 'hsl(25, 25%, 10%)' : 'hsl(25, 25%, 15%)';
-        marker.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;' +
-            'box-sizing:border-box;padding:0;width:16px;height:16px;min-width:16px;' +
-            'border-radius:9999px;line-height:16px;text-align:center;font-size:10px;' +
-            'font-family:sans-serif;font-weight:600;cursor:pointer;margin:0 2px;' +
-            `vertical-align:super;user-select:none;background:${bg};color:${fg};`;
+        // `!important` on every box/text property here: EPUB stylesheets
+        // routinely style `sup` broadly for real footnote markers (padding,
+        // borders, their own line-height), and since that CSS lives in the
+        // same document as this marker (unlike the app's own Tailwind
+        // classes, which never reach in here at all), those rules can win
+        // over a plain inline style and throw off the circle's sizing or
+        // push the number off-center.
+        marker.style.cssText = 'all:initial !important;box-sizing:border-box !important;' +
+            'display:inline-flex !important;align-items:center !important;justify-content:center !important;' +
+            'padding:0 !important;border:none !important;width:16px !important;height:16px !important;' +
+            'min-width:16px !important;max-width:16px !important;border-radius:9999px !important;' +
+            'line-height:16px !important;text-align:center !important;font-size:10px !important;' +
+            'font-family:sans-serif !important;font-weight:600 !important;cursor:pointer !important;' +
+            'margin:0 2px !important;vertical-align:super !important;user-select:none !important;' +
+            `background:${bg} !important;color:${fg} !important;`;
         marker.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
         range.insertNode(marker);
     } catch { /* skip this annotation rather than crash the whole pass */ }
@@ -1113,18 +1196,18 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 if (!epubWindow || !epubSelection || !epubSelection.toString() || !epubSelection.rangeCount) {
                     continue;
                 }
-                // Compute the offset the same way getSelectionDetails does
-                // for the other formats, just against this iframe's own
-                // body - processEpubView derives currentTextForTTS from
-                // that same (visible, first) chapter's body innerText, so
-                // the offsets line up as long as this is that same chapter.
+                // The offset must be computed in the same space
+                // currentTextForTTS/findEpubTextPosition use (see
+                // epubDomPositionToTextOffset above) - a plain
+                // Range.toString().length here (as the other formats use)
+                // would drift out of sync by one character per paragraph
+                // boundary crossed before the selection, since that string
+                // has no paragraph breaks in it at all.
                 const container = epubWindow.document.body;
                 const range = epubSelection.getRangeAt(0);
                 if (container && container.contains(range.startContainer)) {
-                    const preSelectionRange = range.cloneRange();
-                    preSelectionRange.selectNodeContents(container);
-                    preSelectionRange.setEnd(range.startContainer, range.startOffset);
-                    return { text: range.toString(), startIndex: preSelectionRange.toString().length };
+                    const startIndex = epubDomPositionToTextOffset(container, range.startContainer, range.startOffset);
+                    return { text: range.toString(), startIndex };
                 }
                 return { text: epubSelection.toString(), startIndex: null };
             }
@@ -1423,10 +1506,11 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                       try {
                           const range = sel.getRangeAt(0);
                           if (!body.contains(range.startContainer)) return;
-                          const preSelectionRange = range.cloneRange();
-                          preSelectionRange.selectNodeContents(body);
-                          preSelectionRange.setEnd(range.startContainer, range.startOffset);
-                          epubLastSelectionRef.current = { text: range.toString(), startIndex: preSelectionRange.toString().length };
+                          // See epubDomPositionToTextOffset's comment above -
+                          // must stay in the same offset space as
+                          // currentTextForTTS, not a raw Range.toString() count.
+                          const startIndex = epubDomPositionToTextOffset(body, range.startContainer, range.startOffset);
+                          epubLastSelectionRef.current = { text: range.toString(), startIndex };
                       } catch { /* keep the previous value on failure */ }
                   };
 

@@ -219,6 +219,67 @@ export const requestDeleteUserOtp = () => postJson<ApiResult>('/api/admin/users/
 export const backfillStorageUsage = () =>
   postJson<ApiResult & { updated?: number; missing?: number }>('/api/admin/storage/backfill');
 
+// --- Favorites / Notes-Favorites (D1-backed, syncs across devices) ---
+// These used to live in localStorage only (see localStorageService.ts),
+// which is why they never appeared on a second device/browser. The server
+// now stores them in D1 keyed by the logged-in user.
+
+export const fetchFavoriteItems = async (): Promise<import('@/types').FavoriteItem[]> => {
+  try {
+    const res = await fetch('/api/favorites', { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { success: boolean; items?: import('@/types').FavoriteItem[] };
+    return data.success ? data.items || [] : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveFavoriteItemRemote = (item: import('@/types').FavoriteItem) =>
+  postJson<ApiResult>('/api/favorites', item);
+
+export const deleteFavoriteItemRemote = async (id: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`/api/favorites?id=${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as ApiResult;
+    return !!data.success;
+  } catch {
+    return false;
+  }
+};
+
+export const fetchNoteFavorites = async (): Promise<import('@/types').NoteFavoriteItem[]> => {
+  try {
+    const res = await fetch('/api/notes-favorites', { credentials: 'include' });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { success: boolean; items?: import('@/types').NoteFavoriteItem[] };
+    return data.success ? data.items || [] : [];
+  } catch {
+    return [];
+  }
+};
+
+export const saveNoteFavoriteRemote = (item: import('@/types').NoteFavoriteItem) =>
+  postJson<ApiResult>('/api/notes-favorites', item);
+
+export const deleteNoteFavoriteRemote = async (id: string): Promise<boolean> => {
+  try {
+    const res = await fetch(`/api/notes-favorites?id=${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as ApiResult;
+    return !!data.success;
+  } catch {
+    return false;
+  }
+};
+
 export const getMyStorageUsage = async (): Promise<{ usedBytes: number; quotaBytes: number; percentage: number } | null> => {
   try {
     const res = await fetch('/api/storage/usage', { credentials: 'include' });

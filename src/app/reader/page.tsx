@@ -979,23 +979,36 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                   // epub.js renders each chapter inside its own iframe, so a
                   // touch/swipe on the actual book text never reaches a
                   // touchstart/touchend handler attached to the outer React
-                  // div - it's a separate document. epub.js re-dispatches
-                  // touch events through the rendition itself specifically
-                  // so gesture navigation can be wired up here instead. Only
+                  // div - it's a separate document, and (unlike what an
+                  // earlier attempt here assumed) epub.js does not
+                  // re-dispatch touch events through the rendition itself -
+                  // checked against the installed epub.js source, nothing in
+                  // it emits "touchstart"/"touchend" on the rendition.
+                  // Instead, attach real touch listeners straight onto each
+                  // chapter iframe's own document as it's rendered. Only
                   // meaningful in paged mode - continuous scroll mode is
                   // already navigated by the normal scroll gesture.
                   let epubTouchStartX = 0;
-                  rendition.on('touchstart', (event: TouchEvent) => {
+                  const epubSwipeThreshold = 50;
+                  const onEpubIframeTouchStart = (event: TouchEvent) => {
                       epubTouchStartX = event.changedTouches[0].screenX;
-                  });
-                  rendition.on('touchend', (event: TouchEvent) => {
+                  };
+                  const onEpubIframeTouchEnd = (event: TouchEvent) => {
                       if (isEpubContinuousScrollRef.current) return;
                       const touchEndX = event.changedTouches[0].screenX;
                       const xDiff = epubTouchStartX - touchEndX;
-                      const swipeThreshold = 50;
-                      if (Math.abs(xDiff) <= swipeThreshold) return;
+                      if (Math.abs(xDiff) <= epubSwipeThreshold) return;
                       if (xDiff > 0) navigateEpub('next');
                       else navigateEpub('prev');
+                  };
+                  rendition.on('rendered', (_section: any, view: any) => {
+                      const iframeDoc: Document | undefined = view?.contents?.document;
+                      if (!iframeDoc) return;
+                      // Each chapter gets a fresh iframe/document, so these
+                      // never need explicit removal - the old document (and
+                      // its listeners) is simply discarded with the iframe.
+                      iframeDoc.addEventListener('touchstart', onEpubIframeTouchStart, { passive: true });
+                      iframeDoc.addEventListener('touchend', onEpubIframeTouchEnd, { passive: true });
                   });
 
                   rendition.on('displayed', async (view: any) => {
@@ -2799,9 +2812,22 @@ HighlightableContent.displayName = 'HighlightableContent';
                 transition={{ type: "spring", stiffness: 300, damping: 25 }}
             >
                 <div className="flex items-center gap-1 flex-wrap justify-end p-2 bg-background/80 backdrop-blur-sm rounded-lg border shadow-lg cursor-move">
-                    <Button 
-                        onClick={playPauseSpeech} 
-                        disabled={mainButtonState.disabled || isEditingTtsText} 
+                    <Button
+                        // Without this, tapping the button on a touch
+                        // device clears the text selection *before* the
+                        // click handler runs (touchstart fires first and
+                        // the browser drops the selection then, well before
+                        // any click/mouseup) - so playPauseSpeech would
+                        // never see a selection to play from on mobile,
+                        // even though the exact same flow works on desktop
+                        // (where mousedown alone doesn't clear a selection
+                        // unless preventDefault is skipped). Both handlers
+                        // are needed: mousedown for desktop's own edge
+                        // cases, touchstart for mobile.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onTouchStart={(e) => e.preventDefault()}
+                        onClick={playPauseSpeech}
+                        disabled={mainButtonState.disabled || isEditingTtsText}
                         variant={mainButtonState.variant}
                         size="icon"
                         className={cn("h-9 w-9", mainButtonState.variant === "outline" && "border-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950")}
@@ -2812,8 +2838,9 @@ HighlightableContent.displayName = 'HighlightableContent';
                     <Button onClick={handleFavoriteSelection} variant="outline" size="icon" className="h-9 w-9 border-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950" title={readerDict.favorite} disabled={isEditingTtsText}>
                         <Star className="h-4 w-4 text-amber-500" />
                     </Button>
-                    <Button 
+                    <Button
                         onMouseDown={(e) => e.preventDefault()}
+                        onTouchStart={(e) => e.preventDefault()}
                         onClick={() => {
                             const selection = getSelectedText();
                             const trimmedSelection = selection.text.trim();

@@ -739,6 +739,127 @@ function clearLiveRangeHighlight(root: HTMLElement) {
     } catch { /* best-effort cleanup only */ }
 }
 
+// EPUB's plain text (currentTextForTTS, via processEpubView) used to be
+// built from the browser's own `body.innerText`, which follows CSS
+// layout/rendering rules (it inserts a line break at every block-level
+// boundary, collapses runs of whitespace, skips hidden elements, etc).
+// Every place that later needs to turn a character offset *into* that same
+// string back into a real DOM position (applyLiveRangeHighlight,
+// insertEpubAnnotationMarker) instead walked the raw text nodes with a
+// plain TreeWalker - which has no concept of paragraph breaks at all, so it
+// disagreed with innerText by roughly one character for every block element
+// crossed. That drift is exactly what put annotation markers (and, more
+// subtly, playback highlights) further and further from the right spot the
+// deeper into a chapter they landed - "the marker showed up somewhere else
+// entirely" for anything past the first paragraph or two.
+//
+// The fix is to stop relying on `innerText` and instead use one single
+// walking algorithm - implemented once, below - for BOTH building the plain
+// text and mapping an offset in it back to a DOM position, so the two can
+// never drift apart.
+const EPUB_BLOCK_TAGS = new Set([
+    'P', 'DIV', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+    'BLOCKQUOTE', 'TR', 'TABLE', 'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'UL', 'OL', 'BR',
+]);
+
+// Walks every text node under `root` in document order, calling
+// `onSegment(text, node)` for each one - and, once real content has
+// started, also for a synthetic "\n" (node: null) whenever a block-level
+// element boundary is crossed, mirroring how `innerText` visually separates
+// paragraphs. Leading whitespace-only text nodes (and any block boundaries
+// among them) are skipped entirely, matching what `.trim()` would remove
+// from the front of the assembled string. Returning true from `onSegment`
+// stops the walk early.
+function walkEpubPlainText(root: HTMLElement, onSegment: (text: string, node: Text | null) => boolean | void) {
+    const doc = root.ownerDocument;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_ALL);
+    let node: Node | null;
+    let started = false;
+    while ((node = walker.nextNode())) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            const text = (node as Text).data;
+            if (!text) continue;
+            if (!started) {
+                if (!text.trim()) continue;
+                started = true;
+            }
+            if (onSegment(text, node as Text)) return;
+        } else if (node.nodeType === Node.ELEMENT_NODE && EPUB_BLOCK_TAGS.has((node as Element).tagName)) {
+            if (started) {
+                if (onSegment('\n', null)) return;
+            }
+        }
+    }
+}
+
+// Builds the plain-text string for a chapter's body - use this instead of
+// `body.innerText` for anything whose offsets will later need to be mapped
+// back into the DOM via findEpubTextPosition below.
+function extractEpubPlainText(root: HTMLElement): string {
+    let out = '';
+    walkEpubPlainText(root, (text) => { out += text; });
+    return out.trimEnd();
+}
+
+// The inverse of extractEpubPlainText: given a character offset into the
+// string that function would return for `root`, finds the real DOM
+// node/offset that character actually lives at (or, for an offset that
+// lands exactly on a synthetic paragraph break, the end of the text right
+// before it).
+function findEpubTextPosition(root: HTMLElement, charIndex: number): { node: Text; offset: number } | null {
+    if (charIndex < 0) return null;
+    let cur = 0;
+    let result: { node: Text; offset: number } | null = null;
+    let lastText: Text | null = null;
+    walkEpubPlainText(root, (text, node) => {
+        if (node) lastText = node;
+        const len = text.length;
+        if (charIndex >= cur && charIndex <= cur + len) {
+            if (node) {
+                result = { node, offset: charIndex - cur };
+            } else if (lastText) {
+                result = { node: lastText, offset: (lastText as Text).data.length };
+            }
+            return true;
+        }
+        cur += len;
+        return false;
+    });
+    if (!result && lastText) {
+        result = { node: lastText, offset: (lastText as Text).data.length };
+    }
+    return result;
+}
+
+// EPUB-specific equivalent of applyLiveRangeHighlight below, built on
+// findEpubTextPosition instead of a plain TreeWalker so its offsets stay in
+// sync with extractEpubPlainText/currentTextForTTS. (applyLiveRangeHighlight
+// itself stays as-is for MOBI/DOCX, whose plain text already comes from
+// `textContent` with no synthetic breaks, so it already matches a plain
+// TreeWalker - adding paragraph breaks there would shift every one of its
+// offsets instead of fixing anything.)
+function applyEpubRangeHighlight(root: HTMLElement, start: number, end: number): HTMLElement | null {
+    if (start < 0 || end <= start) return null;
+    const doc = root.ownerDocument;
+    try {
+        const startPos = findEpubTextPosition(root, start);
+        const endPos = findEpubTextPosition(root, end);
+        if (!startPos || !endPos) return null;
+        const range = doc.createRange();
+        range.setStart(startPos.node, startPos.offset);
+        range.setEnd(endPos.node, endPos.offset);
+        const span = doc.createElement('span');
+        span.className = 'text-green-600 bg-green-600/10';
+        span.style.color = '#16a34a';
+        span.style.backgroundColor = 'rgba(22, 163, 74, 0.1)';
+        span.setAttribute('data-highlight-target', 'true');
+        range.surroundContents(span);
+        return span;
+    } catch {
+        return null;
+    }
+}
+
 // EPUB's main view has no AnnotationMarkers overlay at all (that component
 // positions markers with absolute CSS in the *parent* document, which can't
 // reach across into an iframe's own coordinate space without a lot of
@@ -747,8 +868,9 @@ function clearLiveRangeHighlight(root: HTMLElement) {
 // over the iframe, this inserts small clickable marker elements directly
 // INTO the chapter iframe's own document, right at each annotation's
 // resolved position - sidestepping the cross-frame positioning problem
-// entirely, using the same text-node/offset walking approach as
-// applyLiveRangeHighlight.
+// entirely, using findEpubTextPosition (see above) to land on the correct
+// character rather than a plain TreeWalker that disagreed with how
+// currentTextForTTS was built.
 function clearEpubAnnotationMarkers(root: HTMLElement) {
     try {
         root.querySelectorAll('[data-annotation-marker="true"]').forEach((el) => el.remove());
@@ -759,30 +881,30 @@ function insertEpubAnnotationMarker(root: HTMLElement, charIndex: number, label:
     if (charIndex < 0) return;
     const doc = root.ownerDocument;
     try {
-        const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        let cur = 0;
-        let node: Node | null;
-        while ((node = walker.nextNode())) {
-            const textNode = node as Text;
-            const len = textNode.data.length;
-            if (cur + len >= charIndex) {
-                const offset = Math.max(0, Math.min(len, charIndex - cur));
-                const range = doc.createRange();
-                range.setStart(textNode, offset);
-                range.collapse(true);
-                const marker = doc.createElement('sup');
-                marker.textContent = label;
-                marker.setAttribute('data-annotation-marker', 'true');
-                marker.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;' +
-                    'width:16px;height:16px;min-width:16px;border-radius:9999px;background:#0f172a;' +
-                    'color:#fff;font-size:10px;line-height:1;font-family:sans-serif;cursor:pointer;' +
-                    'margin:0 2px;vertical-align:middle;user-select:none;';
-                marker.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
-                range.insertNode(marker);
-                return;
-            }
-            cur += len;
-        }
+        const pos = findEpubTextPosition(root, charIndex);
+        if (!pos) return;
+        const range = doc.createRange();
+        range.setStart(pos.node, pos.offset);
+        range.collapse(true);
+        const marker = doc.createElement('sup');
+        marker.textContent = label;
+        marker.setAttribute('data-annotation-marker', 'true');
+        // Matches the app's `--primary`/`--primary-foreground` theme colors
+        // (a light red/salmon badge with dark text) instead of an
+        // unrelated hardcoded navy - this iframe has no Tailwind stylesheet
+        // and no access to the parent document's CSS variables, so the
+        // actual HSL values are inlined directly, picked by whether the
+        // parent page currently has the "dark" theme class applied.
+        const isDarkTheme = typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
+        const bg = isDarkTheme ? 'hsl(18, 56%, 65%)' : 'hsl(18, 56%, 75%)';
+        const fg = isDarkTheme ? 'hsl(25, 25%, 10%)' : 'hsl(25, 25%, 15%)';
+        marker.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;' +
+            'box-sizing:border-box;padding:0;width:16px;height:16px;min-width:16px;' +
+            'border-radius:9999px;line-height:16px;text-align:center;font-size:10px;' +
+            'font-family:sans-serif;font-weight:600;cursor:pointer;margin:0 2px;' +
+            `vertical-align:super;user-select:none;background:${bg};color:${fg};`;
+        marker.addEventListener('click', (e) => { e.stopPropagation(); onClick(); });
+        range.insertNode(marker);
     } catch { /* skip this annotation rather than crash the whole pass */ }
 }
 
@@ -1116,14 +1238,14 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
                 imageElement.onerror = () => {
                     if (!isMountedRef.current) return;
                     epubImageForOcrRef.current = null;
-                    const pageText = (contentBody.innerText || "").trim();
+                    const pageText = extractEpubPlainText(contentBody);
                     setCurrentTextForTTS(pageText || "Could not load image. No fallback text found.");
                     setEpubPageIsImage(false);
                 };
             }
-        } else { 
+        } else {
             epubImageForOcrRef.current = null;
-            const pageText = (contentBody.innerText || "").trim();
+            const pageText = extractEpubPlainText(contentBody);
             if (isMountedRef.current) {
                 setCurrentTextForTTS(pageText || "This page has no text or image content.");
                 setEpubPageIsImage(false);
@@ -2107,11 +2229,37 @@ HighlightableContent.displayName = 'HighlightableContent';
     }
     if (!range) return;
 
-    const span = applyLiveRangeHighlight(body, range.start, range.end);
+    const span = applyEpubRangeHighlight(body, range.start, range.end);
     if (span) {
-        const elementRect = span.getBoundingClientRect();
-        const viewHeight = contents?.window?.innerHeight ?? 0;
-        if (elementRect.top < 0 || elementRect.bottom > viewHeight) {
+        // `span.getBoundingClientRect()` is relative to the chapter
+        // iframe's OWN viewport, not the outer page - and in continuous
+        // scroll mode, epub.js sizes each chapter's iframe to fit its full
+        // content height rather than giving it its own internal scrollbar,
+        // so that rect's top/bottom values stay within [0, iframe height]
+        // no matter how far the *page* has actually scrolled past it.
+        // Comparing them against the iframe's own innerHeight (as this used
+        // to) could therefore never detect "scrolled off screen" at all -
+        // the real scrolling happens on scrollContainerRef, in the parent
+        // document. Translate the span's iframe-relative rect into the
+        // parent document's coordinate space via the iframe element itself
+        // (same-origin, so `frameElement` is reachable) before comparing it
+        // against the actual scroll container's visible bounds.
+        const scrollContainer = scrollContainerRef.current;
+        const iframeEl = contents?.window?.frameElement as HTMLElement | null;
+        if (scrollContainer && iframeEl) {
+            const spanRect = span.getBoundingClientRect();
+            const iframeRect = iframeEl.getBoundingClientRect();
+            const containerRect = scrollContainer.getBoundingClientRect();
+            const absoluteTop = iframeRect.top + spanRect.top;
+            const absoluteBottom = iframeRect.top + spanRect.bottom;
+            if (absoluteTop < containerRect.top || absoluteBottom > containerRect.bottom) {
+                const delta = (absoluteTop + absoluteBottom) / 2 - (containerRect.top + containerRect.bottom) / 2;
+                scrollContainer.scrollBy({ top: delta, behavior: 'smooth' });
+            }
+        } else {
+            // Paginated (non-scrolled) mode, or the iframe isn't reachable
+            // for some reason - fall back to the iframe's own scrollIntoView,
+            // which is at least harmless if it can't actually scroll anything.
             span.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     }

@@ -61,6 +61,99 @@ import DOMPurify from 'dompurify';
 
 const PUNCTUATION_REGEX = /[.,?!,。？！，、\n\r"“„”'‘’`*_{}\[\]()#&@:;~<>/\\|\-—–^%$《》]/g;
 
+// pdf.js's getTextContent() returns text items in the order they were
+// written into the PDF's content stream, which for a lot of real-world
+// documents - academic papers above all - does NOT match visual reading
+// order. Two-column layouts in particular are frequently interleaved
+// line-by-line between the left and right column in the stream, so simply
+// joining the items in-order produces scrambled text that reads like it
+// belongs to a different document entirely. This reconstructs a much closer
+// approximation of true reading order: group items into lines by vertical
+// position, then split lines into "full width" (titles, captions, single
+// column paragraphs) vs. column-width lines, and flatten each left/right
+// column band (the run of narrow lines between two full-width lines) in
+// top-to-bottom, left-then-right order.
+function extractReadableTextFromPdfPage(
+  textContent: { items: any[] },
+  pageWidth: number
+): string {
+  type TextItem = { str: string; x: number; y: number; width: number; height: number };
+
+  const items: TextItem[] = textContent.items
+    .filter((it: any) => typeof it.str === 'string' && it.str.trim() !== '')
+    .map((it: any) => ({
+      str: it.str as string,
+      x: it.transform[4] as number,
+      y: it.transform[5] as number,
+      width: (it.width as number) || 0,
+      height: (it.height as number) || Math.abs((it.transform[3] as number) || 10),
+    }));
+
+  if (items.length === 0) return '';
+  if (!pageWidth || pageWidth <= 0) {
+    // Fall back to plain in-order join if we don't have page dimensions to
+    // reason about columns with.
+    return items.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // Group items into lines: items whose baseline y is within a small
+  // tolerance of each other belong to the same visual line.
+  const sortedByY = [...items].sort((a, b) => b.y - a.y);
+  const lines: TextItem[][] = [];
+  for (const item of sortedByY) {
+    const line = lines.find((l) => Math.abs(l[0].y - item.y) <= 3);
+    if (line) line.push(item);
+    else lines.push([item]);
+  }
+  lines.forEach((line) => line.sort((a, b) => a.x - b.x));
+
+  const joinLine = (line: TextItem[]): string => {
+    let result = '';
+    let prevEnd: number | null = null;
+    for (const item of line) {
+      if (prevEnd !== null) {
+        const gap = item.x - prevEnd;
+        if (gap > item.height * 0.15 && !result.endsWith(' ')) result += ' ';
+      }
+      result += item.str;
+      prevEnd = item.x + item.width;
+    }
+    return result;
+  };
+
+  const columnSplitX = pageWidth / 2;
+  const wideThreshold = pageWidth * 0.6;
+  const outputLines: string[] = [];
+  let pendingLeft: TextItem[][] = [];
+  let pendingRight: TextItem[][] = [];
+
+  const flushColumns = () => {
+    for (const line of pendingLeft) outputLines.push(joinLine(line));
+    for (const line of pendingRight) outputLines.push(joinLine(line));
+    pendingLeft = [];
+    pendingRight = [];
+  };
+
+  for (const line of lines) {
+    const minX = line[0].x;
+    const last = line[line.length - 1];
+    const maxX = last.x + last.width;
+    const lineWidth = maxX - minX;
+
+    if (lineWidth >= wideThreshold) {
+      flushColumns();
+      outputLines.push(joinLine(line));
+    } else {
+      const centerX = (minX + maxX) / 2;
+      if (centerX < columnSplitX) pendingLeft.push(line);
+      else pendingRight.push(line);
+    }
+  }
+  flushColumns();
+
+  return outputLines.join('\n').replace(/[ \t]+/g, ' ').trim();
+}
+
 type SpeechOrigin = 'main' | 'repeat' | null;
 
 type TtsAreaState = 'hidden' | 'caption' | 'fullscreen';
@@ -293,6 +386,26 @@ const getCharPosition = (container: HTMLElement, charIndex: number): { top: numb
     return null; // charIndex is out of bounds
 };
 
+// An annotation's `startIndex` is only reliable as long as the surrounding
+// text hasn't changed shape since it was created - but it very much can:
+// switching a PDF page between extracted-text and OCR'd text, editing the
+// TTS box text, or (previously) a non-deterministic text-extraction order
+// all shift where a given piece of text now sits. Trusting a stale
+// startIndex blindly is exactly what let a note added on "MSTO" end up
+// rendered next to unrelated text after a refresh. This re-locates the
+// annotation's target text in the current text whenever the stored index no
+// longer points at it, and returns null (rather than a wrong guess) when
+// the text genuinely isn't there anymore.
+function resolveAnnotationPosition(text: string, ann: Annotation): number | null {
+    if (!text || !ann.targetText) return null;
+    if (ann.startIndex >= 0) {
+        const direct = text.substring(ann.startIndex, ann.startIndex + ann.targetText.length);
+        if (direct === ann.targetText) return ann.startIndex;
+    }
+    const idx = text.indexOf(ann.targetText);
+    return idx === -1 ? null : idx;
+}
+
 const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: React.RefObject<HTMLElement>, annotations: Annotation[], text: string }) => {
     const [positions, setPositions] = useState<Record<string, { top: number, left: number } | null>>({});
 
@@ -300,8 +413,12 @@ const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: 
         if (containerRef.current && annotations.length > 0 && text) {
             const newPositions: Record<string, { top: number, left: number } | null> = {};
             annotations.forEach(ann => {
-                // Use the end of the target text for positioning the marker
-                const finalCharIndex = ann.startIndex + ann.targetText.length - 1;
+                // Use the end of the target text for positioning the marker,
+                // resolved against the current text rather than trusting a
+                // possibly-stale stored index.
+                const resolvedStart = resolveAnnotationPosition(text, ann);
+                if (resolvedStart === null) { newPositions[ann.id] = null; return; }
+                const finalCharIndex = resolvedStart + ann.targetText.length - 1;
                 newPositions[ann.id] = getCharPosition(containerRef.current!, finalCharIndex);
             });
             setPositions(newPositions);
@@ -338,20 +455,27 @@ const sortedAnnotations = useMemo(() => {
     
     if (activeDoc?.type === 'pdf' && !isPdfTextView) {
         const pageNum = currentPdfPageNum;
+        // Filtering by page number alone isn't enough: if the text shown for
+        // this page has since changed (OCR replacing extracted text, a
+        // manual edit, etc.) a stale startIndex can land on completely
+        // unrelated content. Drop annotations whose target text can no
+        // longer be found anywhere in the current page text at all -
+        // resolveAnnotationPosition (used by AnnotationMarkers below) will
+        // relocate the ones that can still be found but have moved.
         return allAnnotations
-            .filter(ann => ann.pageNumber === pageNum)
+            .filter(ann => ann.pageNumber === pageNum && resolveAnnotationPosition(currentTextForTTS, ann) !== null)
             .sort((a, b) => a.startIndex - b.startIndex);
     }
-    
+
     // For text views (PDF text, EPUB, TXT, Scratchpad)
     const currentText = activeDoc ? currentTextForTTS : scratchpadText;
     if (currentText) {
         return allAnnotations
-            // This is the fix: check both text and the exact start index.
-            .filter(ann => {
-                const expectedText = currentText.substring(ann.startIndex, ann.startIndex + ann.targetText.length);
-                return expectedText === ann.targetText;
-            })
+            // Keep the annotation as long as its text can still be found
+            // somewhere in the current text, even if it has shifted position
+            // (resolveAnnotationPosition relocates it) - only drop it once
+            // the text it was attached to is genuinely gone.
+            .filter(ann => resolveAnnotationPosition(currentText, ann) !== null)
             .sort((a, b) => a.startIndex - b.startIndex);
     }
 
@@ -591,10 +715,12 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
               const pagePromises = [];
               for (let i = 1; i <= pdf.numPages; i++) {
                 pagePromises.push(
-                  pdf.getPage(i).then(page => 
+                  pdf.getPage(i).then(page =>
                     page.getTextContent().then(textContent => {
+                      const pageWidth = page.getViewport({ scale: 1 }).width;
+                      const text = extractReadableTextFromPdfPage(textContent, pageWidth);
                       page.cleanup();
-                      return textContent.items.map(item => ('str' in item ? item.str : '')).join(' ');
+                      return text;
                     })
                   )
                 );
@@ -877,23 +1003,32 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
             const page: PDFPageProxy = await pdfDocProxy.getPage(currentPdfPageNum);
             if (isStale) { if (page) page.cleanup(); return; }
             
-            // Use a fixed high-resolution scale for rendering the canvas
-            const renderScale = 2.0;
+            // Render at a resolution that accounts for the device's pixel
+            // density and the zoom slider's max (5x), so the page stays
+            // sharp instead of being stretched up from a low-res canvas -
+            // the earlier fixed 2.0 scale looked visibly blurry on
+            // retina/high-DPI screens and at higher zoom levels.
+            const dpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+            const renderScale = 2.5 * dpr;
             const viewport = page.getViewport({ scale: renderScale });
             const canvas = document.createElement('canvas'); const context = canvas.getContext('2d');
             canvas.height = viewport.height; canvas.width = viewport.width;
-            
+            if (context) {
+                context.imageSmoothingEnabled = true;
+                context.imageSmoothingQuality = 'high';
+            }
             if (context) await page.render({ canvasContext: context, viewport }).promise;
             if (isStale || !isMountedRef.current) { if (page) page.cleanup(); return; }
             setPdfPageImage(canvas.toDataURL('image/png'));
-            
+
             const pdfDocFromState = activeDoc as StoredPdfDocument;
             if (pdfDocFromState.ocrTextPerPage?.[currentPdfPageNum]) {
-                setCurrentTextForTTS(pdfDocFromState.ocrTextPerPage[currentPdfPageNum]); 
+                setCurrentTextForTTS(pdfDocFromState.ocrTextPerPage[currentPdfPageNum]);
                 setPdfPageIsTextBased(false);
             } else {
                 const textContent = await page.getTextContent();
-                const pageText = textContent.items.map(item => ('str' in item ? item.str : '')).join(' ').replace(/\s+/g, ' ').trim();
+                const pageWidthPt = page.getViewport({ scale: 1 }).width;
+                const pageText = extractReadableTextFromPdfPage(textContent, pageWidthPt);
                 if (pageText) {
                     setCurrentTextForTTS(pageText); 
                     setPdfPageIsTextBased(true);
@@ -928,7 +1063,8 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
     const renderAll = async () => {
       setIsRenderingContinuous(true);
       setContinuousPageImages(new Array(pdfTotalPages).fill(null));
-      const renderScale = 1.5; // a bit lower than the single-page view's 2.0 - rendering every page at once is heavier
+      const contDpr = typeof window !== 'undefined' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+      const renderScale = 1.8 * contDpr; // a bit lower base than the single-page view - rendering every page at once is heavier - but still DPR-aware so pages aren't blurry on retina screens
       for (let pageNum = 1; pageNum <= pdfTotalPages; pageNum++) {
         if (isStale) return;
         try {
@@ -939,6 +1075,10 @@ const getSelectedText = useCallback((): { text: string; startIndex: number | nul
           const context = canvas.getContext('2d');
           canvas.height = viewport.height;
           canvas.width = viewport.width;
+          if (context) {
+            context.imageSmoothingEnabled = true;
+            context.imageSmoothingQuality = 'high';
+          }
           if (context) await page.render({ canvasContext: context, viewport }).promise;
           if (isStale) { page.cleanup(); return; }
           const dataUrl = canvas.toDataURL('image/png');

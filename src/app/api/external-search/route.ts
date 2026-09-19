@@ -183,6 +183,86 @@ function isLikelyFetchable(rawUrl: string): boolean {
   }
 }
 
+// Same header spoofing as /api/external-search/proxy uses to actually fetch
+// these files - reused here so the pre-check sees the same thing the proxy
+// will see, rather than getting a different (often friendlier) response to
+// a plain server-side request with no headers at all.
+const BROWSER_LIKE_HEADERS = {
+  'User-Agent':
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+  Accept: 'application/pdf,text/html,application/xhtml+xml,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+};
+
+const VERIFY_TIMEOUT_MS = 3500;
+
+// A best-effort "will this actually open?" pre-check, run only for sources
+// whose links point at arbitrary (unpredictable) third-party domains -
+// DOAJ/Semantic Scholar/OpenAlex/Crossref/CORE all surface links to whatever
+// journal or repository happens to host the article, and the static
+// BOT_HOSTILE_HOSTS list can only catch hosts we already know are bad.
+// A HEAD (falling back to a ranged GET for servers that don't support HEAD)
+// catches the rest: outright rejections, and the common "200 OK but it's
+// actually an HTML captcha/landing page, not the file" bot-block pattern.
+// This is why users kept hitting "link expired"/"blocked by anti-bot
+// protection" only AFTER clicking into a result - this runs the same check
+// proactively, before the result is ever shown.
+async function verifyResultFetchable(url: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
+  try {
+    let res: Response;
+    try {
+      res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: controller.signal, headers: BROWSER_LIKE_HEADERS });
+    } catch {
+      return false;
+    }
+    if (!res.ok || res.status === 405) {
+      // Some servers don't implement HEAD properly (405, or a misleading
+      // 200 with no real content) - a tiny ranged GET is a cheap fallback
+      // that still avoids downloading the whole file just to check it.
+      try {
+        res = await fetch(url, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: { ...BROWSER_LIKE_HEADERS, Range: 'bytes=0-256' },
+        });
+      } catch {
+        return false;
+      }
+    }
+    // Consume/cancel the (tiny, at most 257-byte) body so the connection is
+    // released cleanly rather than left dangling.
+    res.body?.cancel().catch(() => {});
+    if (!res.ok) return false;
+    const contentType = res.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) return false;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Sources whose file links point at arbitrary third-party domains (as
+// opposed to arxiv/gutenberg/zenodo/hcommons/pmc/archive, which all hand
+// back a direct link from their OWN API/CDN that has consistently proven
+// fetchable) - these are the ones worth spending the verification budget on.
+const SOURCES_NEEDING_VERIFICATION = new Set<ExternalSearchResult['source']>([
+  'semanticscholar',
+  'openalex',
+  'crossref',
+  'doaj',
+  'core',
+]);
+
+// Caps total verification requests per search so this can't blow through
+// Cloudflare Workers' per-request subrequest limit on top of the ~15-20
+// subrequests the searches themselves already make.
+const MAX_VERIFICATIONS_PER_SEARCH = 20;
+
 async function searchSemanticScholar(query: string, apiKey: string | undefined): Promise<RawResult[]> {
   const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
     query
@@ -637,21 +717,36 @@ export async function GET(req: NextRequest) {
       archive: 'books',
       doaj: 'academic',
     };
-    const results: ExternalSearchResult[] = await Promise.all(
-      rawResults.map(async ({ rawUrl, ...rest }) => {
-        // Apply publisher-landing-page-to-direct-PDF resolution universally,
-        // not just for the source it was first noticed on (DOAJ) - the same
-        // MDPI (etc.) article can surface via Semantic Scholar's
-        // openAccessPdf, OpenAlex's oa_url, Crossref's link, and so on, all
-        // pointing at the same landing page.
-        const resolvedUrl = resolveToDirectPdfUrl(rawUrl);
-        return {
-          ...rest,
-          category: CATEGORY_BY_SOURCE[rest.source],
-          fileUrl: await signUrl(resolvedUrl),
-          originalUrl: resolvedUrl,
-        };
+    // Apply publisher-landing-page-to-direct-PDF resolution universally, not
+    // just for the source it was first noticed on (DOAJ) - the same MDPI
+    // (etc.) article can surface via Semantic Scholar's openAccessPdf,
+    // OpenAlex's oa_url, Crossref's link, and so on, all pointing at the
+    // same landing page.
+    const resolved = rawResults.map((r) => ({ ...r, resolvedUrl: resolveToDirectPdfUrl(r.rawUrl) }));
+
+    // Proactively drop results that won't actually open, instead of letting
+    // the user find out by clicking "阅读"/"下载" and hitting a "link
+    // expired"/"blocked by anti-bot protection" error. Bounded by
+    // MAX_VERIFICATIONS_PER_SEARCH so one search can't spend an unbounded
+    // number of subrequests on this.
+    let verificationBudget = MAX_VERIFICATIONS_PER_SEARCH;
+    const passesVerification = await Promise.all(
+      resolved.map((r) => {
+        if (!SOURCES_NEEDING_VERIFICATION.has(r.source)) return Promise.resolve(true);
+        if (verificationBudget <= 0) return Promise.resolve(true); // budget spent - fall back to the static host-list filter already applied upstream
+        verificationBudget--;
+        return verifyResultFetchable(r.resolvedUrl);
       })
+    );
+    const fetchableResults = resolved.filter((_, i) => passesVerification[i]);
+
+    const results: ExternalSearchResult[] = await Promise.all(
+      fetchableResults.map(async ({ rawUrl, resolvedUrl, ...rest }) => ({
+        ...rest,
+        category: CATEGORY_BY_SOURCE[rest.source],
+        fileUrl: await signUrl(resolvedUrl),
+        originalUrl: resolvedUrl,
+      }))
     );
 
     return NextResponse.json({ success: true, results });

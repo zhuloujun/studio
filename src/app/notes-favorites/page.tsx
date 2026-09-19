@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter }
 import { useToast } from '@/hooks/use-toast';
 import { Trash2, Info, NotebookText, FileText, Play, Pause, Loader2, Smartphone, Cloud as CloudIcon, Star, Repeat1, ListOrdered, SkipBack, SkipForward, Settings, ChevronLeft, ChevronRight, Pencil } from 'lucide-react';
 import * as LocalStorage from '@/lib/localStorageService';
+import { fetchNoteFavorites, deleteNoteFavoriteRemote } from '@/lib/authService';
 import type { NoteFavoriteItem, TTSVoice, TTSSettings, PlaybackMode } from '@/types';
 import { format } from 'date-fns';
 import { AuthGuard } from '@/components/auth/AuthGuard';
@@ -119,7 +120,7 @@ function NotesFavoritesPageContent() {
 
   // Load initial settings and favorite items
   useEffect(() => {
-    setFavoriteNotes(LocalStorage.loadNoteFavorites());
+    fetchNoteFavorites().then(setFavoriteNotes);
     setPlaybackMode(LocalStorage.loadNotesPlaybackMode());
 
     const loadAndSetSettings = (loader: () => TTSSettings, setter: React.Dispatch<React.SetStateAction<TTSSettings>>) => {
@@ -194,17 +195,17 @@ function NotesFavoritesPageContent() {
     };
   }, [populateVoiceList]);
 
-  const performDelete = () => {
+  const performDelete = async () => {
     if (!noteToDelete) return;
     if (currentItem?.item.id === noteToDelete.id) stop();
-    LocalStorage.deleteNoteFavorite(noteToDelete.id);
-    const updatedItems = LocalStorage.loadNoteFavorites();
-    setFavoriteNotes(updatedItems);
+    const deletedId = noteToDelete.id;
+    setFavoriteNotes(prev => prev.filter(item => item.id !== deletedId));
     if (paginatedItems.length === 1 && currentPage > 1) {
         setCurrentPage(currentPage - 1);
     }
     toast({ title: notesFavDict.noteFavoriteRemoved });
     setNoteToDelete(null);
+    await deleteNoteFavoriteRemote(deletedId);
   };
   
   const handleSettingChange = (

@@ -313,6 +313,16 @@ function ReaderPageComponent({ docId, isMobile }: { docId: string | null; isMobi
   const [scratchpadAnnotations, setScratchpadAnnotations] = useState<Annotation[]>([]);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const lastSpokenTextRef = useRef<string>('');
+  // Paired with lastSpokenTextRef: remembers the exact {start,end} highlight
+  // range used the last time repeat-play had a fresh, live text selection.
+  // The browser's native Selection is easily lost after the DOM around the
+  // highlighted text gets rebuilt (e.g. the first repeat-play's <span>
+  // highlight reverting back to plain text once playback finishes), so a
+  // second press of the repeat button often finds no active selection and
+  // falls back to replaying lastSpokenTextRef - previously with a null
+  // range, meaning no highlight. Falling back to this cached range too lets
+  // the highlight keep working on repeated presses of the same passage.
+  const lastSpokenRangeRef = useRef<{ start: number; end: number } | null>(null);
 
   const [isPerformingOcr, setIsPerformingOcr] = useState(false);
   const [currentTextForTTS, setCurrentTextForTTS] = useState<string>("");
@@ -456,8 +466,28 @@ function resolveAnnotationPosition(text: string, ann: Annotation): number | null
         const direct = text.substring(ann.startIndex, ann.startIndex + ann.targetText.length);
         if (direct === ann.targetText) return ann.startIndex;
     }
-    const idx = text.indexOf(ann.targetText);
-    return idx === -1 ? null : idx;
+    // The stored index no longer matches - re-locate it. Common words like
+    // "and" can occur dozens of times on one page, so grabbing the *first*
+    // occurrence (the old behavior) frequently landed the marker on a
+    // completely unrelated occurrence of the same word. Instead, scan every
+    // occurrence and pick the one closest to where it used to be - a much
+    // better bet when the surrounding text has only shifted slightly (a
+    // cross-device sync, a re-extraction, a nearby edit) rather than changed
+    // entirely.
+    let idx = text.indexOf(ann.targetText);
+    if (idx === -1) return null;
+    if (ann.startIndex >= 0) {
+        let best = idx;
+        let bestDist = Math.abs(idx - ann.startIndex);
+        let next = text.indexOf(ann.targetText, idx + 1);
+        while (next !== -1) {
+            const dist = Math.abs(next - ann.startIndex);
+            if (dist < bestDist) { best = next; bestDist = dist; }
+            next = text.indexOf(ann.targetText, next + 1);
+        }
+        idx = best;
+    }
+    return idx;
 }
 
 const AnnotationMarkers = ({ containerRef, annotations, text }: { containerRef: React.RefObject<HTMLElement>, annotations: Annotation[], text: string }) => {
@@ -1694,8 +1724,19 @@ HighlightableContent.displayName = 'HighlightableContent';
     
     if (isSpeaking) {
       if (isPaused) {
+        // If the user selected some text while playback was paused, treat
+        // this press as "read this instead" rather than "resume where I
+        // left off" - starting a fresh playback from the selection, same
+        // as pressing play with nothing playing yet. Only plain
+        // resume-from-pause when there's no selection to jump to.
+        const selectionInfo = getSelectedText();
+        const selectedText = selectionInfo?.text?.trim();
+        if (selectedText && selectionInfo?.startIndex !== null && selectionInfo?.startIndex !== undefined) {
+          _startSpeech('main', selectionInfo.startIndex);
+          return;
+        }
         isPausedRef.current = false;
-        if (ttsSettings.engine === 'local' && window.speechSynthesis) { window.speechSynthesis.resume(); } 
+        if (ttsSettings.engine === 'local' && window.speechSynthesis) { window.speechSynthesis.resume(); }
         else { audioPlayerRef.current?.play().catch(() => stopSpeech(true)); }
         setIsPaused(false);
       } else {
@@ -2550,14 +2591,22 @@ HighlightableContent.displayName = 'HighlightableContent';
                             const trimmedSelection = selection.text.trim();
                             const textToSpeak = trimmedSelection || lastSpokenTextRef.current;
                             if (textToSpeak) {
-                                // Only a live selection (with a known offset into the
-                                // reading text) can be highlighted precisely; the
-                                // lastSpokenTextRef fallback has no reliable position.
+                                // Prefer a live selection's precise offset into the
+                                // reading text. When there's no fresh selection (very
+                                // common on a 2nd+ press of this button, since the
+                                // browser's native selection is easily lost once the
+                                // highlighted text's DOM gets rebuilt), fall back to
+                                // the range remembered from the last time we *did*
+                                // have one, so repeat playback keeps highlighting the
+                                // same passage instead of losing the highlight.
                                 let range: { start: number; end: number } | null = null;
                                 if (trimmedSelection && selection.startIndex !== null) {
                                     const leadingWhitespace = selection.text.length - selection.text.trimStart().length;
                                     const start = selection.startIndex + leadingWhitespace;
                                     range = { start, end: start + trimmedSelection.length };
+                                    lastSpokenRangeRef.current = range;
+                                } else if (textToSpeak === lastSpokenTextRef.current) {
+                                    range = lastSpokenRangeRef.current;
                                 }
                                 speakTextOnce(textToSpeak, range);
                             } else {
